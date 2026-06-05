@@ -1,0 +1,16 @@
+# Local data downloads (live mode doesn't need these)
+data/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Streamlit secrets — never commit
+.streamlit/secrets.toml
+
+# Dev/build scaffolding (optional to keep)
+_build_app.py
+_testsrc.py
+_probe.py
