@@ -2800,8 +2800,236 @@ def render_coa(df) -> None:
                int_cols=('Total', 'Writing', 'Vetting', 'Deal Edits', 'Completed'))
 
 
+# ───────────────────── QA Scorecard (#3 KPI summary) ─────────────────────
+MONTH_ORDER = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+SC_NUM_COLS = ["auditTargetPct", "calibrationPct", "disputeAcceptPct", "docErrorPct",
+               "regAssigned", "regCompleted", "superAssigned", "superCompleted",
+               "adhocAssigned", "adhocCompleted", "totalAssigned", "totalCompleted",
+               "casesCalibrated", "disputesRaised", "validDisputes", "processImprov",
+               "week", "year"]
+SC_KPIS = [("auditTargetPct", "Audit Target", 100, "target 100%"),
+           ("calibrationPct", "Calibration Accuracy", 90, "target 85–90%"),
+           ("disputeAcceptPct", "Dispute Acceptance", 99, "target 95–99%"),
+           ("docErrorPct", "Documentation", 98, "target 98%")]
+
+
+def _sc_pct(v):
+    return "–" if v is None or (isinstance(v, float) and pd.isna(v)) else f"{v:.1f}%"
+
+
+def _sc_color(v, target):
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return "blue"
+    if v >= target:
+        return "green"
+    if v >= target - 10:
+        return "orange"
+    return "red"
+
+
+def _sc_mkey(m):
+    return MONTH_ORDER.index(m) if m in MONTH_ORDER else 99
+
+
+def _sc_avg(frame, col):
+    if col not in frame.columns:
+        return None
+    v = pd.to_numeric(frame[col], errors="coerce").dropna()
+    return float(v.mean()) if len(v) else None
+
+
+def render_scorecard(df):
+    st.caption("Per-QA performance KPIs — weekly & monthly, with current-vs-previous comparison.")
+    if df is None or df.empty:
+        st.info("No scorecard data yet. Add the scorecard source to Apps Script "
+                "(getScorecardData) and deploy a New version, then ↻ Refresh.")
+        return
+    df = df.copy()
+    for c in SC_NUM_COLS:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    df = df[df["qaName"].notna() & (df["qaName"].astype(str).str.strip() != "")]
+    months_present = [m for m in MONTH_ORDER if m in set(df["month"].dropna())]
+
+    fc = st.columns(3)
+    with fc[0]:
+        msel = st.selectbox("Month", ["All"] + months_present, key="sc_month")
+    with fc[1]:
+        qsel = st.selectbox("QA", ["All"] + sorted(df["qaName"].dropna().unique()), key="sc_qa")
+    with fc[2]:
+        weeks = sorted({int(w) for w in df["week"].dropna()})
+        wsel = st.selectbox("Week", ["All"] + [str(w) for w in weeks], key="sc_week")
+
+    d = df.copy()
+    if msel != "All":
+        d = d[d["month"] == msel]
+    if qsel != "All":
+        d = d[d["qaName"] == qsel]
+    if wsel != "All":
+        d = d[d["week"] == int(wsel)]
+    if d.empty:
+        st.info("No rows for this selection.")
+        return
+
+    # KPI cards (averages over the current selection)
+    kpi_row([{"label": lbl, "value": _sc_pct(_sc_avg(d, col)), "hint": hint,
+              "color": _sc_color(_sc_avg(d, col), tgt)} for col, lbl, tgt, hint in SC_KPIS])
+
+    # Weekly trend (respects Month + QA, spans all weeks) + volume by QA
+    dt = df.copy()
+    if msel != "All":
+        dt = dt[dt["month"] == msel]
+    if qsel != "All":
+        dt = dt[dt["qaName"] == qsel]
+    wk_order = sorted({int(w) for w in dt["week"].dropna()})
+    c1, c2 = st.columns([3, 2])
+    with c1:
+        st.markdown("**Weekly KPI trend**")
+        if wk_order:
+            series = {lbl: [_sc_avg(dt[dt["week"] == w], col) for w in wk_order]
+                      for col, lbl, _, _ in SC_KPIS}
+            st.plotly_chart(line_chart(["Wk " + str(w) for w in wk_order], series, ymax=115),
+                            width="stretch")
+        else:
+            st.info("No weekly data.")
+    with c2:
+        st.markdown("**Audit volume by QA**")
+        vol = d.groupby("qaName").agg(Assigned=("totalAssigned", "sum"),
+                                      Completed=("totalCompleted", "sum")).reset_index()
+        st.plotly_chart(stacked_bar(list(vol["qaName"]),
+                        {"Assigned": list(vol["Assigned"]), "Completed": list(vol["Completed"])},
+                        horizontal=True), width="stretch")
+
+    # Current vs previous month (the #3 core)
+    st.markdown("### Current vs previous month")
+    cmp_src = df if qsel == "All" else df[df["qaName"] == qsel]
+    present = sorted(set(cmp_src["month"].dropna()), key=_sc_mkey)
+    cur_m = msel if msel != "All" else (present[-1] if present else None)
+    prev_m = None
+    if cur_m in present:
+        i = present.index(cur_m)
+        prev_m = present[i - 1] if i > 0 else None
+    if cur_m:
+        st.caption(f"Current: **{cur_m}**" + (f"   ·   previous: **{prev_m}**" if prev_m
+                   else "   ·   (no earlier month)"))
+        rows = []
+        for qa in sorted(cmp_src["qaName"].dropna().unique()):
+            qd = cmp_src[cmp_src["qaName"] == qa]
+            row = {"QA": qa}
+            for col, lbl, _, _ in SC_KPIS:
+                cur = _sc_avg(qd[qd["month"] == cur_m], col)
+                row[lbl] = round(cur, 1) if cur is not None else None
+                if prev_m:
+                    prv = _sc_avg(qd[qd["month"] == prev_m], col)
+                    row[lbl + " Δ"] = (round(cur - prv, 1)
+                                       if (cur is not None and prv is not None) else None)
+            rows.append(row)
+        cmp_df = pd.DataFrame(rows)
+        st.dataframe(cmp_df, width="stretch", hide_index=True)
+        st.download_button("⬇ Download comparison (CSV)", cmp_df.to_csv(index=False).encode(),
+                           file_name="qa_scorecard_comparison.csv", mime="text/csv", key="sc_dl")
+
+    # Per-QA detail for the current selection
+    st.markdown("### Per-QA detail (current selection)")
+    rows = []
+    for qa in sorted(d["qaName"].dropna().unique()):
+        g = d[d["qaName"] == qa]
+        row = {"QA": qa,
+               "Samples": int(pd.to_numeric(g["totalCompleted"], errors="coerce").fillna(0).sum())}
+        for col, lbl, _, _ in SC_KPIS:
+            a = _sc_avg(g, col)
+            row[lbl] = round(a, 1) if a is not None else None
+        rows.append(row)
+    detail = pd.DataFrame(rows)
+    show_table(detail, pct_cols=tuple(lbl for _, lbl, _, _ in SC_KPIS), int_cols=("Samples",))
+
+
+# ───────────────────── Work Requests (#2 ideations) ─────────────────────
+WR_MONTHS = {1: "Jan", 2: "Feb", 3: "Mar", 4: "Apr", 5: "May", 6: "Jun",
+             7: "Jul", 8: "Aug", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dec"}
+WR_STATUS = ["Open", "WIP", "Closed"]
+WR_STATUS_COL = {"Open": "#1a73e8", "WIP": "#e37400", "Closed": "#137333"}
+
+
+def render_workrequests(df):
+    st.caption("Process-improvement ideations / work requests raised by each QA (target: 4 per QA per month).")
+    if df is None or df.empty:
+        st.info("No work-request data yet. Add getWorkRequestsData to Apps Script, "
+                "deploy a New version, then ↻ Refresh.")
+        return
+    df = df.copy()
+    df["week"] = pd.to_numeric(df["week"], errors="coerce")
+    df["month"] = pd.to_numeric(df["month"], errors="coerce")
+    df["monthName"] = df["month"].map(WR_MONTHS).fillna(df["month"].astype("string"))
+
+    fc = st.columns(3)
+    with fc[0]:
+        qsel = st.selectbox("Raised by", ["All"] + sorted(df["raisedBy"].dropna().unique()), key="wr_qa")
+    with fc[1]:
+        ssel = st.selectbox("Status", ["All"] + WR_STATUS, key="wr_status")
+    with fc[2]:
+        mopts = [WR_MONTHS[m] for m in sorted(df["month"].dropna().unique()) if m in WR_MONTHS]
+        msel = st.selectbox("Month", ["All"] + mopts, key="wr_month")
+
+    d = df.copy()
+    if qsel != "All":
+        d = d[d["raisedBy"] == qsel]
+    if ssel != "All":
+        d = d[d["status"] == ssel]
+    if msel != "All":
+        d = d[d["monthName"] == msel]
+    if d.empty:
+        st.info("No ideas for this selection.")
+        return
+
+    total = len(d)
+    closed = int((d["status"] == "Closed").sum())
+    kpi_row([
+        {"label": "Total Ideas", "value": str(total), "hint": f"{d['raisedBy'].nunique()} QAs", "color": "blue"},
+        {"label": "Open", "value": str(int((d["status"] == "Open").sum())), "hint": "awaiting action", "color": "blue"},
+        {"label": "In Progress", "value": str(int((d["status"] == "WIP").sum())), "hint": "WIP", "color": "orange"},
+        {"label": "Closed", "value": str(closed),
+         "hint": f"{(closed / total * 100 if total else 0):.0f}% done", "color": "green"},
+    ])
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.markdown("**Ideas by QA**")
+        by = d.groupby("raisedBy").size().sort_values(ascending=False)
+        st.plotly_chart(hbar(list(by.index), list(by.values), "#1a73e8"), width="stretch")
+    with c2:
+        st.markdown("**Status**")
+        counts = [int((d["status"] == s).sum()) for s in WR_STATUS]
+        st.plotly_chart(donut(WR_STATUS, counts, [WR_STATUS_COL[s] for s in WR_STATUS]), width="stretch")
+    with c3:
+        st.markdown("**Ideas by month**")
+        months = [WR_MONTHS[m] for m in sorted(df["month"].dropna().unique()) if m in WR_MONTHS]
+        st.plotly_chart(vbar(months, [int((d["monthName"] == m).sum()) for m in months]), width="stretch")
+
+    st.markdown("### Ideas per QA per month  ·  target 4/month")
+    pv = d.pivot_table(index="raisedBy", columns="monthName", values="suggestion",
+                       aggfunc="count", fill_value=0)
+    ordered = [WR_MONTHS[m] for m in sorted(df["month"].dropna().unique())
+               if WR_MONTHS.get(m) in pv.columns]
+    if ordered:
+        pv = pv[ordered]
+    pv["Total"] = pv.sum(axis=1)
+    st.dataframe(pv.reset_index().rename(columns={"raisedBy": "QA"}), width="stretch", hide_index=True)
+
+    st.markdown("### Ideation log")
+    log = d[["date", "week", "monthName", "raisedBy", "suggestion", "status"]].rename(
+        columns={"date": "Date", "week": "Week", "monthName": "Month",
+                 "raisedBy": "Raised by", "suggestion": "Suggestion", "status": "Status"})
+    st.dataframe(log, width="stretch", hide_index=True)
+    st.download_button("⬇ Download work requests (CSV)", log.to_csv(index=False).encode(),
+                       file_name="work_requests.csv", mime="text/csv", key="wr_dl")
+
+
 # ───────────────────── navigation / main ─────────────────────
 TABS = [
+    ("QA Scorecard",    "scorecard",   render_scorecard),
+    ("Work Requests",   "workRequests", render_workrequests),
     ("WoW Calibration", "calibration", render_calibration),
     ("Disputes",        "disputes",    render_disputes),
     ("FL Audit",        "flAudit",     render_flaudit),
@@ -2818,24 +3046,146 @@ TABS = [
 ]
 
 
+# ───────────────────── global Month/Week filter (#1) ─────────────────────
+_PERIOD_DATE = {
+    "calibration": "date", "disputes": "disputeDate", "flAudit": "assignedDate",
+    "superAudit": "assignedDate", "cr": "date", "esc": "createdDate", "cts": "date",
+    "cara": "date", "gor": "dateOfCreation", "rfa": "transactionDate", "psg": "date",
+    "moReg": "assignedDate", "moDeal": "dateOpened", "coa": "date",
+}
+_PERIOD_WEEK = {"calibration": "week", "flAudit": "week", "moReg": "week",
+                "scorecard": "week", "disputes": "weekNumber", "workRequests": "week"}
+_PERIOD_MONTH = {"disputes": "month", "scorecard": "month", "coa": "month",
+                 "workRequests": "month"}
+_FULL_MONTH = {"january": "Jan", "february": "Feb", "march": "Mar", "april": "Apr",
+               "may": "May", "june": "Jun", "july": "Jul", "august": "Aug",
+               "september": "Sep", "october": "Oct", "november": "Nov", "december": "Dec"}
+
+
+def _to_month3(v):
+    if v is None:
+        return None
+    s = str(v).strip()
+    if not s or s.lower() in ("nan", "none", "nat"):
+        return None
+    low = s.lower()
+    if low in _FULL_MONTH:
+        return _FULL_MONTH[low]
+    if low[:3].capitalize() in MONTH_ORDER:
+        return low[:3].capitalize()
+    try:
+        n = int(float(s))
+        if 1 <= n <= 12:
+            return MONTH_ORDER[n - 1]
+    except (ValueError, TypeError):
+        pass
+    return None
+
+
+def enrich_periods(key, df):
+    """Add normalized _month (3-letter) and _week (number) for the global filter."""
+    if df is None or df.empty or "_month" in df.columns:
+        return df
+    df = df.copy()
+    mcol = _PERIOD_MONTH.get(key)
+    if mcol and mcol in df.columns:
+        df["_month"] = df[mcol].map(_to_month3)
+    elif _PERIOD_DATE.get(key) in df.columns:
+        df["_month"] = pd.to_datetime(df[_PERIOD_DATE[key]], errors="coerce").dt.strftime("%b")
+    else:
+        df["_month"] = None
+    wcol = _PERIOD_WEEK.get(key)
+    if wcol and wcol in df.columns:
+        df["_week"] = pd.to_numeric(df[wcol], errors="coerce")
+    elif _PERIOD_DATE.get(key) in df.columns:
+        df["_week"] = pd.to_datetime(df[_PERIOD_DATE[key]], errors="coerce").dt.isocalendar().week
+    else:
+        df["_week"] = pd.NA
+    return df
+
+
+def apply_global(df):
+    """Filter by the sidebar global Month/Week, then drop the helper columns."""
+    if df is None or df.empty:
+        return df
+    gm = st.session_state.get("g_month", [])
+    gw = st.session_state.get("g_week", [])
+    out = df
+    if gm and "_month" in out.columns:
+        out = out[out["_month"].isin(gm)]
+    if gw and "_week" in out.columns:
+        out = out[pd.to_numeric(out["_week"], errors="coerce").isin(gw)]
+    return out.drop(columns=[c for c in out.columns if c.startswith("_")], errors="ignore")
+
+
+def _clean(df):
+    if df is None:
+        return pd.DataFrame()
+    return df.drop(columns=[c for c in df.columns if c.startswith("_")], errors="ignore")
+
+
 def main():
     data, errors = load_all()
+    data = {k: enrich_periods(k, v) for k, v in data.items()}
+
     st.sidebar.markdown("## 📊 QA Dashboard")
     choice = st.sidebar.radio("Section", [t[0] for t in TABS], key="__nav")
+    cur_key = next((k for (lbl, k, _) in TABS if lbl == choice), None)
+
+    # global filter options (union across all sources)
+    months, weeks = set(), set()
+    for dfx in data.values():
+        if dfx is None or dfx.empty:
+            continue
+        if "_month" in dfx.columns:
+            months |= set(dfx["_month"].dropna())
+        if "_week" in dfx.columns:
+            weeks |= {int(w) for w in pd.to_numeric(dfx["_week"], errors="coerce").dropna()}
+    st.sidebar.markdown("### Filters")
+    st.sidebar.multiselect("Month", [m for m in MONTH_ORDER if m in months], key="g_month")
+    st.sidebar.multiselect("Week", sorted(weeks), key="g_week")
+
     if st.sidebar.button("↻ Refresh data", key="__refresh"):
         load_all.clear()
         st.rerun()
+
+    # ── exports (#4) ──
+    st.sidebar.markdown("### Export")
+    cur_raw = apply_global(data.get("moReg") if cur_key == "moa" else data.get(cur_key))
+    if cur_raw is not None and not cur_raw.empty:
+        st.sidebar.download_button("⬇ This tab (CSV)", _clean(cur_raw).to_csv(index=False).encode(),
+                                   file_name=f"{cur_key}.csv", mime="text/csv", key="__dl_cur")
+
+    def _all_xlsx():
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as xl:
+            wrote = False
+            for k, dfx in data.items():
+                cd = _clean(apply_global(dfx))
+                if cd is not None and not cd.empty:
+                    cd.to_excel(xl, sheet_name=str(k)[:31], index=False)
+                    wrote = True
+            if not wrote:
+                pd.DataFrame({"info": ["no data"]}).to_excel(xl, sheet_name="info", index=False)
+        return buf.getvalue()
+
+    st.sidebar.download_button("⬇ Export ALL (Excel)", _all_xlsx(),
+                               file_name="qa_dashboard_export.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                               key="__dl_all")
+
     if errors:
         with st.sidebar.expander("⚠ %d source(s) unavailable" % len(errors)):
             for k, v in errors.items():
                 st.caption("**%s** — %s" % (k, v))
+
     st.markdown("## " + choice)
     for label, key, fn in TABS:
         if label == choice:
             if key == "moa":
-                render_moa(data.get("moReg"), data.get("moDeal"))
+                render_moa(apply_global(data.get("moReg")), apply_global(data.get("moDeal")))
             else:
-                fn(data.get(key))
+                fn(apply_global(data.get(key)))
             break
 
 

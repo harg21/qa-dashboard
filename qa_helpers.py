@@ -58,6 +58,8 @@ LIVE_KEY_MAP = {
     "moReg":       "moRegular",
     "moDeal":      "moDealAlert",
     "coa":         "coAudits",
+    "scorecard":   "scorecard",
+    "workRequests": "workRequests",
 }
 
 
