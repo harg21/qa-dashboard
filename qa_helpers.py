@@ -75,6 +75,20 @@ def _fetch_one(url, js_key):
     return _json.loads(text)
 
 
+def fetch_source(key, url=None):
+    """Fetch ONE source live from the Apps Script endpoint → (DataFrame, error)."""
+    url = (url or APPS_SCRIPT_URL).strip()
+    if not url:
+        return pd.DataFrame(), "APPS_SCRIPT_URL is not set."
+    if key not in LIVE_KEY_MAP:
+        return pd.DataFrame(), f"unknown source '{key}'"
+    try:
+        recs = _fetch_one(url, LIVE_KEY_MAP[key])
+        return pd.DataFrame(recs or []), None
+    except Exception as e:
+        return pd.DataFrame(), str(e)
+
+
 def fetch_live(url=None):
     """Pull every source live from the Apps Script endpoint, one request per
     spreadsheet, all in parallel. Returns (data_dict, errors_dict)."""
@@ -85,7 +99,7 @@ def fetch_live(url=None):
         raise RuntimeError("APPS_SCRIPT_URL is not set.")
 
     data, errors = {}, {}
-    with ThreadPoolExecutor(max_workers=12) as ex:
+    with ThreadPoolExecutor(max_workers=len(LIVE_KEY_MAP)) as ex:
         futs = {ex.submit(_fetch_one, url, js): app
                 for app, js in LIVE_KEY_MAP.items()}
         for fut, app_key in futs.items():

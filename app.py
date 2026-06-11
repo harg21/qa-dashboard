@@ -3124,52 +3124,70 @@ def _clean(df):
     return df.drop(columns=[c for c in df.columns if c.startswith("_")], errors="ignore")
 
 
-def main():
-    data, errors = load_all()
-    data = {k: enrich_periods(k, v) for k, v in data.items()}
+@st.cache_data(ttl=900, show_spinner="Loading…")
+def load_source(key):
+    """Fetch + enrich ONE source (cached 15 min). Lazy: only the active tab loads."""
+    if APPS_SCRIPT_URL:
+        df, err = fetch_source(key)
+    else:
+        data, errs = load_all()
+        df, err = data.get(key, pd.DataFrame()), errs.get(key)
+    return enrich_periods(key, df), err
 
+
+def main():
     st.sidebar.markdown("## 📊 QA Dashboard")
     choice = st.sidebar.radio("Section", [t[0] for t in TABS], key="__nav")
     cur_key = next((k for (lbl, k, _) in TABS if lbl == choice), None)
+    errors = {}
 
-    # global filter options (union across all sources)
-    months, weeks = set(), set()
-    for dfx in data.values():
-        if dfx is None or dfx.empty:
-            continue
-        if "_month" in dfx.columns:
-            months |= set(dfx["_month"].dropna())
-        if "_week" in dfx.columns:
-            weeks |= {int(w) for w in pd.to_numeric(dfx["_week"], errors="coerce").dropna()}
+    def get(k):
+        df, err = load_source(k)
+        if err:
+            errors[k] = err
+        return df
+
+    # Global filter options come from the (fast) Scorecard, which spans the whole timeline
+    sc, _ = load_source("scorecard")
+    months = [m for m in MONTH_ORDER if "_month" in sc.columns and m in set(sc["_month"].dropna())]
+    weeks = (sorted({int(w) for w in pd.to_numeric(sc["_week"], errors="coerce").dropna()})
+             if "_week" in sc.columns and not sc.empty else [])
     st.sidebar.markdown("### Filters")
-    st.sidebar.multiselect("Month", [m for m in MONTH_ORDER if m in months], key="g_month")
-    st.sidebar.multiselect("Week", sorted(weeks), key="g_week")
+    st.sidebar.multiselect("Month", months, key="g_month")
+    st.sidebar.multiselect("Week", weeks, key="g_week")
 
     if st.sidebar.button("↻ Refresh data", key="__refresh"):
-        load_all.clear()
+        load_source.clear()
         st.rerun()
+
+    # Load only the active tab's source(s)
+    if cur_key == "moa":
+        d_reg, d_deal = get("moReg"), get("moDeal")
+        cur_raw = apply_global(d_reg)
+    else:
+        d_cur = get(cur_key)
+        cur_raw = apply_global(d_cur)
 
     # ── exports (#4) ──
     st.sidebar.markdown("### Export")
-    cur_raw = apply_global(data.get("moReg") if cur_key == "moa" else data.get(cur_key))
     if cur_raw is not None and not cur_raw.empty:
         st.sidebar.download_button("⬇ This tab (CSV)", _clean(cur_raw).to_csv(index=False).encode(),
                                    file_name=f"{cur_key}.csv", mime="text/csv", key="__dl_cur")
-
-    def _all_xlsx():
-        buf = io.BytesIO()
-        with pd.ExcelWriter(buf, engine="openpyxl") as xl:
-            wrote = False
-            for k, dfx in data.items():
-                cd = _clean(apply_global(dfx))
-                if cd is not None and not cd.empty:
-                    cd.to_excel(xl, sheet_name=str(k)[:31], index=False)
-                    wrote = True
-            if not wrote:
-                pd.DataFrame({"info": ["no data"]}).to_excel(xl, sheet_name="info", index=False)
-        return buf.getvalue()
-
-    st.sidebar.download_button("⬇ Export ALL (Excel)", _all_xlsx(),
+    with st.sidebar.expander("⬇ Export ALL (Excel)"):
+        st.caption("Pulls every source — first time can take ~1–2 min.")
+        if st.button("Build full export", key="__dl_all_btn"):
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine="openpyxl") as xl:
+                wrote = False
+                for _lbl, k, _fn in TABS:
+                    for kk in (("moReg", "moDeal") if k == "moa" else (k,)):
+                        cd = _clean(apply_global(get(kk)))
+                        if cd is not None and not cd.empty:
+                            cd.to_excel(xl, sheet_name=str(kk)[:31], index=False)
+                            wrote = True
+                if not wrote:
+                    pd.DataFrame({"info": ["no data"]}).to_excel(xl, sheet_name="info", index=False)
+            st.download_button("Download Excel", buf.getvalue(),
                                file_name="qa_dashboard_export.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                key="__dl_all")
@@ -3179,14 +3197,13 @@ def main():
             for k, v in errors.items():
                 st.caption("**%s** — %s" % (k, v))
 
+    # Render the active tab
     st.markdown("## " + choice)
-    for label, key, fn in TABS:
-        if label == choice:
-            if key == "moa":
-                render_moa(apply_global(data.get("moReg")), apply_global(data.get("moDeal")))
-            else:
-                fn(apply_global(data.get(key)))
-            break
+    if cur_key == "moa":
+        render_moa(apply_global(d_reg), apply_global(d_deal))
+    else:
+        fn = next(f for (lbl, k, f) in TABS if k == cur_key)
+        fn(apply_global(d_cur))
 
 
 if os.environ.get("QA_NO_MAIN") != "1":
