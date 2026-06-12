@@ -2919,8 +2919,9 @@ def render_scorecard(df, wr=None):
         st.info("No rows for this selection.")
         return
 
-    # process-improvement counts for the selected period
-    sel_month_nums = {MONTH_ORDER.index(m) + 1 for m in set(d["month"].dropna()) if m in MONTH_ORDER}
+    # process-improvement counts (only narrow by month/year when one is explicitly chosen,
+    # since work requests run past the scorecard's month range)
+    sel_month_nums = {MONTH_ORDER.index(msel) + 1} if (msel != "All" and msel in MONTH_ORDER) else None
     sel_year = int(ysel) if ysel != "All" else None
     wr_by_qa = _wr_counts(wr, sorted(d["qaName"].dropna().unique()), sel_month_nums, sel_year)
 
@@ -2965,6 +2966,16 @@ def render_scorecard(df, wr=None):
         st.plotly_chart(stacked_bar(list(vol["qaName"]),
                         {"Assigned": list(vol["Assigned"]), "Completed": list(vol["Completed"])},
                         horizontal=True), width="stretch")
+
+    # ── process improvements / work requests by QA ──
+    st.markdown("### Process Improvements (work requests)")
+    pi = sorted(wr_by_qa.items(), key=lambda x: -x[1])
+    if any(v for _, v in pi):
+        st.plotly_chart(hbar([q for q, _ in pi], [v for _, v in pi], "#7b1fa2"), width="stretch")
+        st.caption(f"{sum(wr_by_qa.values())} ideas in view · target 4 per QA per month")
+    else:
+        st.caption("No process-improvement work requests for this selection "
+                   "(check the Work Requests source is loaded).")
 
     # ── current vs previous (by granularity) ──
     order = buckets
@@ -3147,6 +3158,21 @@ def _to_month3(v):
     return None
 
 
+def _month_name(s):
+    """Robust 3-letter month from any date-ish string (handles JS date strings,
+    'Sat Jan 04 2026 … (India Standard Time)', ISO, and M/D/YYYY)."""
+    if s is None:
+        return None
+    sl = str(s).strip().lower()
+    if not sl or sl in ("nan", "nat", "none"):
+        return None
+    for m in MONTH_ORDER:
+        if m.lower() in sl:          # JS date strings contain the month name
+            return m
+    dt = pd.to_datetime(str(s), errors="coerce")
+    return dt.strftime("%b") if pd.notna(dt) else None
+
+
 def enrich_periods(key, df):
     """Add normalized _month (3-letter) and _week (number) for the global filter."""
     if df is None or df.empty or "_month" in df.columns:
@@ -3156,7 +3182,7 @@ def enrich_periods(key, df):
     if mcol and mcol in df.columns:
         df["_month"] = df[mcol].map(_to_month3)
     elif _PERIOD_DATE.get(key) in df.columns:
-        df["_month"] = pd.to_datetime(df[_PERIOD_DATE[key]], errors="coerce").dt.strftime("%b")
+        df["_month"] = df[_PERIOD_DATE[key]].map(_month_name)
     else:
         df["_month"] = None
     wcol = _PERIOD_WEEK.get(key)
