@@ -1128,27 +1128,42 @@ def render_calibration(df) -> None:
         return
 
     # ---- Filters ----
+    def _mname(s):
+        sl = str(s).lower()
+        for m in MONTH_ORDER:
+            if m.lower() in sl:
+                return m
+        dt = pd.to_datetime(str(s), errors='coerce')
+        return dt.strftime('%b') if pd.notna(dt) else None
+
     reviewers = sorted([r for r in df['reviewerName'].dropna().unique() if str(r).strip() != ''])
     weeks_all = sorted([int(w) for w in df['week'].dropna().unique()])
     wmin, wmax = (weeks_all[0], weeks_all[-1]) if weeks_all else (0, 0)
+    month_col = df['date'].apply(_mname)
+    months_all = [m for m in MONTH_ORDER if m in set(month_col.dropna())]
 
-    c1, c2, c3, c4 = st.columns([2, 2, 1, 1])
+    c1, c2, c3, c4, c5 = st.columns([2, 2, 1.2, 1, 1])
     with c1:
         proc = st.radio('Process', ['ALL', 'CS', 'MO', 'CO'], horizontal=True, key='calibration_process')
     with c2:
         reviewer = st.selectbox('Reviewer', ['ALL'] + reviewers, key='calibration_reviewer')
     with c3:
-        week_from = st.selectbox('From Week', weeks_all, index=0, key='calibration_week_from') if weeks_all else wmin
+        month_sel = st.selectbox('Month', ['ALL'] + months_all, key='calibration_month')
     with c4:
+        week_from = st.selectbox('From Week', weeks_all, index=0, key='calibration_week_from') if weeks_all else wmin
+    with c5:
         to_opts = [w for w in weeks_all if w >= week_from] or [week_from]
         week_to = st.selectbox('To Week', to_opts, index=len(to_opts) - 1, key='calibration_week_to') if weeks_all else wmax
 
     # ---- Apply filters ----
     fdf = df.copy()
+    fdf['_m'] = month_col
     if proc != 'ALL':
         fdf = fdf[fdf['process'] == proc]
     if reviewer != 'ALL':
         fdf = fdf[fdf['reviewerName'] == reviewer]
+    if month_sel != 'ALL':
+        fdf = fdf[fdf['_m'] == month_sel]
     fdf = fdf[(fdf['week'] >= week_from) & (fdf['week'] <= week_to)]
 
     if fdf.empty:
