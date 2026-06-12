@@ -1128,42 +1128,27 @@ def render_calibration(df) -> None:
         return
 
     # ---- Filters ----
-    def _mname(s):
-        sl = str(s).lower()
-        for m in MONTH_ORDER:
-            if m.lower() in sl:
-                return m
-        dt = pd.to_datetime(str(s), errors='coerce')
-        return dt.strftime('%b') if pd.notna(dt) else None
-
     reviewers = sorted([r for r in df['reviewerName'].dropna().unique() if str(r).strip() != ''])
     weeks_all = sorted([int(w) for w in df['week'].dropna().unique()])
     wmin, wmax = (weeks_all[0], weeks_all[-1]) if weeks_all else (0, 0)
-    month_col = df['date'].apply(_mname)
-    months_all = [m for m in MONTH_ORDER if m in set(month_col.dropna())]
 
-    c1, c2, c3, c4, c5 = st.columns([2, 2, 1.2, 1, 1])
+    c1, c2, c3, c4 = st.columns([2, 2, 1, 1])
     with c1:
         proc = st.radio('Process', ['ALL', 'CS', 'MO', 'CO'], horizontal=True, key='calibration_process')
     with c2:
         reviewer = st.selectbox('Reviewer', ['ALL'] + reviewers, key='calibration_reviewer')
     with c3:
-        month_sel = st.selectbox('Month', ['ALL'] + months_all, key='calibration_month')
-    with c4:
         week_from = st.selectbox('From Week', weeks_all, index=0, key='calibration_week_from') if weeks_all else wmin
-    with c5:
+    with c4:
         to_opts = [w for w in weeks_all if w >= week_from] or [week_from]
         week_to = st.selectbox('To Week', to_opts, index=len(to_opts) - 1, key='calibration_week_to') if weeks_all else wmax
 
     # ---- Apply filters ----
     fdf = df.copy()
-    fdf['_m'] = month_col
     if proc != 'ALL':
         fdf = fdf[fdf['process'] == proc]
     if reviewer != 'ALL':
         fdf = fdf[fdf['reviewerName'] == reviewer]
-    if month_sel != 'ALL':
-        fdf = fdf[fdf['_m'] == month_sel]
     fdf = fdf[(fdf['week'] >= week_from) & (fdf['week'] <= week_to)]
 
     if fdf.empty:
@@ -3162,15 +3147,6 @@ def main():
             errors[k] = err
         return df
 
-    # Global filter options come from the (fast) Scorecard, which spans the whole timeline
-    sc, _ = load_source("scorecard")
-    months = [m for m in MONTH_ORDER if "_month" in sc.columns and m in set(sc["_month"].dropna())]
-    weeks = (sorted({int(w) for w in pd.to_numeric(sc["_week"], errors="coerce").dropna()})
-             if "_week" in sc.columns and not sc.empty else [])
-    st.sidebar.markdown("### Filters")
-    st.sidebar.multiselect("Month", months, key="g_month")
-    st.sidebar.multiselect("Week", weeks, key="g_week")
-
     if st.sidebar.button("↻ Refresh data", key="__refresh"):
         load_source.clear()
         st.rerun()
@@ -3178,25 +3154,51 @@ def main():
     # Load only the active tab's source(s)
     if cur_key == "moa":
         d_reg, d_deal = get("moReg"), get("moDeal")
-        cur_raw = apply_global(d_reg)
+        primary = d_reg if d_reg is not None else pd.DataFrame()
     else:
         d_cur = get(cur_key)
-        cur_raw = apply_global(d_cur)
+        primary = d_cur if d_cur is not None else pd.DataFrame()
+
+    st.markdown("## " + choice)
+
+    # ── inline Month + Week filter (shown on every tab, options from this tab's data) ──
+    mopts = [m for m in MONTH_ORDER if "_month" in primary.columns and m in set(primary["_month"].dropna())]
+    wopts = (sorted({int(w) for w in pd.to_numeric(primary["_week"], errors="coerce").dropna()})
+             if "_week" in primary.columns and not primary.empty else [])
+    sel_m, sel_w = [], []
+    if mopts or wopts:
+        fc = st.columns([2, 2, 6])
+        with fc[0]:
+            sel_m = st.multiselect("Month", mopts, key=f"pm_{cur_key}") if mopts else []
+        with fc[1]:
+            sel_w = st.multiselect("Week", wopts, key=f"pw_{cur_key}") if wopts else []
+
+    def pf(df):
+        """Apply the inline Month/Week selection, then drop helper columns."""
+        if df is None or df.empty:
+            return df
+        out = df
+        if sel_m and "_month" in out.columns:
+            out = out[out["_month"].isin(sel_m)]
+        if sel_w and "_week" in out.columns:
+            out = out[pd.to_numeric(out["_week"], errors="coerce").isin(sel_w)]
+        return out.drop(columns=[c for c in out.columns if c.startswith("_")], errors="ignore")
 
     # ── exports (#4) ──
     st.sidebar.markdown("### Export")
+    cur_raw = pf(primary)
     if cur_raw is not None and not cur_raw.empty:
-        st.sidebar.download_button("⬇ This tab (CSV)", _clean(cur_raw).to_csv(index=False).encode(),
+        st.sidebar.download_button("⬇ This tab (CSV)", cur_raw.to_csv(index=False).encode(),
                                    file_name=f"{cur_key}.csv", mime="text/csv", key="__dl_cur")
     with st.sidebar.expander("⬇ Export ALL (Excel)"):
-        st.caption("Pulls every source — first time can take ~1–2 min.")
+        st.caption("Pulls every source (full data) — first time can take ~1–2 min.")
         if st.button("Build full export", key="__dl_all_btn"):
             buf = io.BytesIO()
             with pd.ExcelWriter(buf, engine="openpyxl") as xl:
                 wrote = False
                 for _lbl, k, _fn in TABS:
                     for kk in (("moReg", "moDeal") if k == "moa" else (k,)):
-                        cd = _clean(apply_global(get(kk)))
+                        cd = _clean(get(kk))
                         if cd is not None and not cd.empty:
                             cd.to_excel(xl, sheet_name=str(kk)[:31], index=False)
                             wrote = True
@@ -3213,12 +3215,11 @@ def main():
                 st.caption("**%s** — %s" % (k, v))
 
     # Render the active tab
-    st.markdown("## " + choice)
     if cur_key == "moa":
-        render_moa(apply_global(d_reg), apply_global(d_deal))
+        render_moa(pf(d_reg), pf(d_deal))
     else:
         fn = next(f for (lbl, k, f) in TABS if k == cur_key)
-        fn(apply_global(d_cur))
+        fn(pf(d_cur))
 
 
 if os.environ.get("QA_NO_MAIN") != "1":
