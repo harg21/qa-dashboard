@@ -1150,14 +1150,11 @@ def render_calibration(df) -> None:
     weeks_all = sorted({int(w) for w in yf['week'].dropna()})
     wmin, wmax = (weeks_all[0], weeks_all[-1]) if weeks_all else (0, 0)
 
-    r2 = st.columns([3, 1, 1])
+    r2 = st.columns([3, 3])
     with r2[0]:
         proc = st.radio('Process', ['ALL', 'CS', 'MO', 'CO'], horizontal=True, key='calibration_process')
     with r2[1]:
-        week_from = st.selectbox('From Week', weeks_all, index=0, key='calibration_week_from') if weeks_all else wmin
-    with r2[2]:
-        to_opts = [w for w in weeks_all if w >= week_from] or [week_from]
-        week_to = st.selectbox('To Week', to_opts, index=len(to_opts) - 1, key='calibration_week_to') if weeks_all else wmax
+        wsel = st.multiselect('Week', weeks_all, key='calibration_week')
 
     # ---- Apply filters ----
     fdf = df.copy()
@@ -1169,7 +1166,8 @@ def render_calibration(df) -> None:
         fdf = fdf[fdf['process'] == proc]
     if reviewer != 'ALL':
         fdf = fdf[fdf['reviewerName'] == reviewer]
-    fdf = fdf[(fdf['week'] >= week_from) & (fdf['week'] <= week_to)]
+    if wsel:
+        fdf = fdf[fdf['week'].isin(wsel)]
 
     if fdf.empty:
         st.info('No data for this view')
