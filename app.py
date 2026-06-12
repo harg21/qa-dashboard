@@ -2839,8 +2839,45 @@ def _sc_avg(frame, col):
     return float(v.mean()) if len(v) else None
 
 
-def render_scorecard(df):
-    st.caption("Per-QA performance KPIs — weekly & monthly, with current-vs-previous comparison.")
+# weightages from the KPI rubric (sheet). Final = weighted avg of KPI%, capped at 100.
+SC_WEIGHTS = {
+    "Tenure (>6mo)": {"Audit Target": 20, "Calibration Accuracy": 30, "Dispute Acceptance": 30, "Documentation": 20},
+    "New (<6mo)":    {"Audit Target": 30, "Calibration Accuracy": 40, "Dispute Acceptance": 30, "Documentation": 0},
+}
+SC_KPI_COL = {"Audit Target": "auditTargetPct", "Calibration Accuracy": "calibrationPct",
+              "Dispute Acceptance": "disputeAcceptPct", "Documentation": "docErrorPct"}
+
+
+def _sc_final(kpi_vals, weights):
+    """Overall Final Points = Σ(weight × min(KPI%,100)) / Σ(weights used)."""
+    num = den = 0.0
+    for lbl, w in weights.items():
+        v = kpi_vals.get(lbl)
+        if w and v is not None and not (isinstance(v, float) and pd.isna(v)):
+            num += w * min(float(v), 100.0)
+            den += w
+    return round(num / den, 1) if den else None
+
+
+def _wr_counts(wr, qa_names, months=None, year=None):
+    """Process-improvement count per scorecard QA (joins short names → full names)."""
+    out = {qa: 0 for qa in qa_names}
+    if wr is None or wr.empty or "raisedBy" not in wr.columns:
+        return out
+    w = wr.copy()
+    if year is not None and "year" in w.columns:
+        w = w[pd.to_numeric(w["year"], errors="coerce") == year]
+    if months and "month" in w.columns:
+        w = w[pd.to_numeric(w["month"], errors="coerce").isin(months)]
+    raisers = [str(r).lower() for r in w["raisedBy"].dropna()]
+    for qa in qa_names:
+        fl = str(qa).lower()
+        out[qa] = sum(1 for r in raisers if r and r in fl)
+    return out
+
+
+def render_scorecard(df, wr=None):
+    st.caption("Per-QA KPIs with weighted Final Points, period filters, and process-improvement counts.")
     if df is None or df.empty:
         st.info("No scorecard data yet. Add the scorecard source to Apps Script "
                 "(getScorecardData) and deploy a New version, then ↻ Refresh.")
@@ -2850,49 +2887,77 @@ def render_scorecard(df):
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
     df = df[df["qaName"].notna() & (df["qaName"].astype(str).str.strip() != "")]
-    months_present = [m for m in MONTH_ORDER if m in set(df["month"].dropna())]
 
-    fc = st.columns(3)
-    with fc[0]:
+    years = sorted({int(y) for y in pd.to_numeric(df["year"], errors="coerce").dropna()})
+    months_present = [m for m in MONTH_ORDER if m in set(df["month"].dropna())]
+    weeks_present = sorted({int(w) for w in df["week"].dropna()})
+
+    f = st.columns([1, 1.2, 1, 2, 1.4])
+    with f[0]:
+        ysel = st.selectbox("Year", ["All"] + [str(y) for y in years], key="sc_year")
+    with f[1]:
         msel = st.selectbox("Month", ["All"] + months_present, key="sc_month")
-    with fc[1]:
+    with f[2]:
+        wsel = st.selectbox("Week", ["All"] + [str(w) for w in weeks_present], key="sc_week")
+    with f[3]:
         qsel = st.selectbox("QA", ["All"] + sorted(df["qaName"].dropna().unique()), key="sc_qa")
-    with fc[2]:
-        weeks = sorted({int(w) for w in df["week"].dropna()})
-        wsel = st.selectbox("Week", ["All"] + [str(w) for w in weeks], key="sc_week")
+    with f[4]:
+        tenure = st.radio("Scoring weights", list(SC_WEIGHTS.keys()), key="sc_tenure", horizontal=False)
+    gran = st.radio("View by", ["Weekly", "Monthly", "Yearly"], horizontal=True, key="sc_gran")
+    weights = SC_WEIGHTS[tenure]
 
     d = df.copy()
+    if ysel != "All":
+        d = d[pd.to_numeric(d["year"], errors="coerce") == int(ysel)]
     if msel != "All":
         d = d[d["month"] == msel]
-    if qsel != "All":
-        d = d[d["qaName"] == qsel]
     if wsel != "All":
         d = d[d["week"] == int(wsel)]
+    if qsel != "All":
+        d = d[d["qaName"] == qsel]
     if d.empty:
         st.info("No rows for this selection.")
         return
 
-    # KPI cards (averages over the current selection)
-    kpi_row([{"label": lbl, "value": _sc_pct(_sc_avg(d, col)), "hint": hint,
-              "color": _sc_color(_sc_avg(d, col), tgt)} for col, lbl, tgt, hint in SC_KPIS])
+    # process-improvement counts for the selected period
+    sel_month_nums = {MONTH_ORDER.index(m) + 1 for m in set(d["month"].dropna()) if m in MONTH_ORDER}
+    sel_year = int(ysel) if ysel != "All" else None
+    wr_by_qa = _wr_counts(wr, sorted(d["qaName"].dropna().unique()), sel_month_nums, sel_year)
 
-    # Weekly trend (respects Month + QA, spans all weeks) + volume by QA
-    dt = df.copy()
-    if msel != "All":
-        dt = dt[dt["month"] == msel]
-    if qsel != "All":
-        dt = dt[dt["qaName"] == qsel]
-    wk_order = sorted({int(w) for w in dt["week"].dropna()})
+    # ── KPI cards + Overall Final Points ──
+    overall_kpis = {lbl: _sc_avg(d, SC_KPI_COL[lbl]) for lbl in SC_KPI_COL}
+    final_pts = _sc_final(overall_kpis, weights)
+    cards = [{"label": lbl, "value": _sc_pct(_sc_avg(d, col)), "hint": hint,
+              "color": _sc_color(_sc_avg(d, col), tgt)} for col, lbl, tgt, hint in SC_KPIS]
+    cards.append({"label": "Overall Final Points", "value": (f"{final_pts:.1f}" if final_pts is not None else "–"),
+                  "hint": f"weighted · {tenure}",
+                  "color": ("green" if (final_pts or 0) >= 90 else "orange" if (final_pts or 0) >= 75 else "red")})
+    kpi_row(cards)
+    st.caption("Weights — " + " · ".join(f"{k} {v}%" for k, v in weights.items() if v) +
+               ".  Process Improvements counted separately (target 4/QA/month).")
+
+    # ── trend by chosen granularity ──
+    if gran == "Weekly":
+        buckets, bcol, blabel = sorted({int(w) for w in d["week"].dropna()}), "week", lambda b: f"Wk {b}"
+        bmatch = lambda frame, b: frame[frame["week"] == b]
+    elif gran == "Monthly":
+        buckets, bcol, blabel = [m for m in MONTH_ORDER if m in set(d["month"].dropna())], "month", lambda b: b
+        bmatch = lambda frame, b: frame[frame["month"] == b]
+    else:
+        buckets = sorted({int(y) for y in pd.to_numeric(d["year"], errors="coerce").dropna()})
+        blabel = lambda b: str(b)
+        bmatch = lambda frame, b: frame[pd.to_numeric(frame["year"], errors="coerce") == b]
+
     c1, c2 = st.columns([3, 2])
     with c1:
-        st.markdown("**Weekly KPI trend**")
-        if wk_order:
-            series = {lbl: [_sc_avg(dt[dt["week"] == w], col) for w in wk_order]
-                      for col, lbl, _, _ in SC_KPIS}
-            st.plotly_chart(line_chart(["Wk " + str(w) for w in wk_order], series, ymax=115),
-                            width="stretch")
+        st.markdown(f"**KPI trend ({gran.lower()})**")
+        if buckets:
+            series = {lbl: [_sc_avg(bmatch(d, b), col) for b in buckets] for col, lbl, _, _ in SC_KPIS}
+            series["Final Points"] = [_sc_final({l: _sc_avg(bmatch(d, b), SC_KPI_COL[l]) for l in SC_KPI_COL}, weights)
+                                      for b in buckets]
+            st.plotly_chart(line_chart([blabel(b) for b in buckets], series, ymax=115), width="stretch")
         else:
-            st.info("No weekly data.")
+            st.info("No data.")
     with c2:
         st.markdown("**Audit volume by QA**")
         vol = d.groupby("qaName").agg(Assigned=("totalAssigned", "sum"),
@@ -2901,48 +2966,48 @@ def render_scorecard(df):
                         {"Assigned": list(vol["Assigned"]), "Completed": list(vol["Completed"])},
                         horizontal=True), width="stretch")
 
-    # Current vs previous month (the #3 core)
-    st.markdown("### Current vs previous month")
-    cmp_src = df if qsel == "All" else df[df["qaName"] == qsel]
-    present = sorted(set(cmp_src["month"].dropna()), key=_sc_mkey)
-    cur_m = msel if msel != "All" else (present[-1] if present else None)
-    prev_m = None
-    if cur_m in present:
-        i = present.index(cur_m)
-        prev_m = present[i - 1] if i > 0 else None
-    if cur_m:
-        st.caption(f"Current: **{cur_m}**" + (f"   ·   previous: **{prev_m}**" if prev_m
-                   else "   ·   (no earlier month)"))
+    # ── current vs previous (by granularity) ──
+    order = buckets
+    st.markdown(f"### Current vs previous ({gran.lower()[:-2] if gran != 'Yearly' else 'year'})")
+    if len(order) >= 1:
+        cur_b = order[-1]
+        prev_b = order[-2] if len(order) >= 2 else None
+        st.caption(f"Current: **{blabel(cur_b)}**" + (f"   ·   previous: **{blabel(prev_b)}**" if prev_b is not None
+                   else "   ·   (no earlier period)"))
         rows = []
-        for qa in sorted(cmp_src["qaName"].dropna().unique()):
-            qd = cmp_src[cmp_src["qaName"] == qa]
+        for qa in sorted(d["qaName"].dropna().unique()):
+            qd = d[d["qaName"] == qa]
+            cur_k = {l: _sc_avg(bmatch(qd, cur_b), SC_KPI_COL[l]) for l in SC_KPI_COL}
             row = {"QA": qa}
-            for col, lbl, _, _ in SC_KPIS:
-                cur = _sc_avg(qd[qd["month"] == cur_m], col)
-                row[lbl] = round(cur, 1) if cur is not None else None
-                if prev_m:
-                    prv = _sc_avg(qd[qd["month"] == prev_m], col)
-                    row[lbl + " Δ"] = (round(cur - prv, 1)
-                                       if (cur is not None and prv is not None) else None)
+            for lbl in SC_KPI_COL:
+                row[lbl] = round(cur_k[lbl], 1) if cur_k[lbl] is not None else None
+            row["Final Pts"] = _sc_final(cur_k, weights)
+            if prev_b is not None:
+                prev_k = {l: _sc_avg(bmatch(qd, prev_b), SC_KPI_COL[l]) for l in SC_KPI_COL}
+                pf_final = _sc_final(prev_k, weights)
+                row["Final Δ"] = (round(row["Final Pts"] - pf_final, 1)
+                                  if (row["Final Pts"] is not None and pf_final is not None) else None)
             rows.append(row)
         cmp_df = pd.DataFrame(rows)
         st.dataframe(cmp_df, width="stretch", hide_index=True)
-        st.download_button("⬇ Download comparison (CSV)", cmp_df.to_csv(index=False).encode(),
-                           file_name="qa_scorecard_comparison.csv", mime="text/csv", key="sc_dl")
 
-    # Per-QA detail for the current selection
+    # ── per-QA detail (current selection) ──
     st.markdown("### Per-QA detail (current selection)")
     rows = []
     for qa in sorted(d["qaName"].dropna().unique()):
         g = d[d["qaName"] == qa]
-        row = {"QA": qa,
-               "Samples": int(pd.to_numeric(g["totalCompleted"], errors="coerce").fillna(0).sum())}
-        for col, lbl, _, _ in SC_KPIS:
-            a = _sc_avg(g, col)
-            row[lbl] = round(a, 1) if a is not None else None
+        kp = {lbl: _sc_avg(g, SC_KPI_COL[lbl]) for lbl in SC_KPI_COL}
+        row = {"QA": qa, "Samples": int(pd.to_numeric(g["totalCompleted"], errors="coerce").fillna(0).sum())}
+        for lbl in SC_KPI_COL:
+            row[lbl] = round(kp[lbl], 1) if kp[lbl] is not None else None
+        row["Process Improv."] = wr_by_qa.get(qa, 0)
+        row["Final Points"] = _sc_final(kp, weights)
         rows.append(row)
     detail = pd.DataFrame(rows)
-    show_table(detail, pct_cols=tuple(lbl for _, lbl, _, _ in SC_KPIS), int_cols=("Samples",))
+    show_table(detail, pct_cols=tuple(SC_KPI_COL.keys()),
+               int_cols=("Samples", "Process Improv.", "Final Points"))
+    st.download_button("⬇ Download scorecard (CSV)", detail.to_csv(index=False).encode(),
+                       file_name="qa_scorecard.csv", mime="text/csv", key="sc_dl")
 
 
 # ───────────────────── Work Requests (#2 ideations) ─────────────────────
@@ -3161,12 +3226,13 @@ def main():
 
     st.markdown("## " + choice)
 
-    # ── inline Month + Week filter (shown on every tab, options from this tab's data) ──
+    # ── inline Month + Week filter (every tab except those with their own period controls) ──
+    SELF_FILTERED = {"scorecard", "workRequests"}
     mopts = [m for m in MONTH_ORDER if "_month" in primary.columns and m in set(primary["_month"].dropna())]
     wopts = (sorted({int(w) for w in pd.to_numeric(primary["_week"], errors="coerce").dropna()})
              if "_week" in primary.columns and not primary.empty else [])
     sel_m, sel_w = [], []
-    if mopts or wopts:
+    if cur_key not in SELF_FILTERED and (mopts or wopts):
         fc = st.columns([2, 2, 6])
         with fc[0]:
             sel_m = st.multiselect("Month", mopts, key=f"pm_{cur_key}") if mopts else []
@@ -3217,6 +3283,8 @@ def main():
     # Render the active tab
     if cur_key == "moa":
         render_moa(pf(d_reg), pf(d_deal))
+    elif cur_key == "scorecard":
+        render_scorecard(d_cur, get("workRequests"))
     else:
         fn = next(f for (lbl, k, f) in TABS if k == cur_key)
         fn(pf(d_cur))
