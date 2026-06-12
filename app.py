@@ -2949,6 +2949,10 @@ def render_scorecard(df, wr=None):
         blabel = lambda b: str(b)
         bmatch = lambda frame, b: frame[pd.to_numeric(frame["year"], errors="coerce") == b]
 
+    # keep only buckets that actually have KPI data (skip blank weeks like 17–18)
+    buckets = [b for b in buckets
+               if any(_sc_avg(bmatch(d, b), SC_KPI_COL[l]) is not None for l in SC_KPI_COL)]
+
     c1, c2 = st.columns([3, 2])
     with c1:
         st.markdown(f"**KPI trend ({gran.lower()})**")
