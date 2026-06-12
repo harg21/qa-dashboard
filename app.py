@@ -1128,23 +1128,43 @@ def render_calibration(df) -> None:
         return
 
     # ---- Filters ----
+    df = df.copy()
+    df['_yr'] = df['date'].apply(lambda s: int(re.search(r'(20\d\d)', str(s)).group(1))
+                                if re.search(r'(20\d\d)', str(s)) else None)
+    df['_mn'] = df['date'].apply(_month_name)
+    years = sorted({int(y) for y in df['_yr'].dropna()})
     reviewers = sorted([r for r in df['reviewerName'].dropna().unique() if str(r).strip() != ''])
-    weeks_all = sorted([int(w) for w in df['week'].dropna().unique()])
+    months_all = [m for m in MONTH_ORDER if m in set(df['_mn'].dropna())]
+
+    r1 = st.columns([1, 1.3, 3])
+    with r1[0]:
+        # default to the latest year so prior-year weeks (e.g. Wk 51 / 2025) aren't mixed in
+        ysel = st.selectbox('Year', ['ALL'] + [str(y) for y in years],
+                            index=len(years) if years else 0, key='calibration_year')
+    with r1[1]:
+        msel = st.selectbox('Month', ['ALL'] + months_all, key='calibration_month')
+    with r1[2]:
+        reviewer = st.selectbox('Reviewer', ['ALL'] + reviewers, key='calibration_reviewer')
+
+    yf = df if ysel == 'ALL' else df[df['_yr'] == int(ysel)]
+    weeks_all = sorted({int(w) for w in yf['week'].dropna()})
     wmin, wmax = (weeks_all[0], weeks_all[-1]) if weeks_all else (0, 0)
 
-    c1, c2, c3, c4 = st.columns([2, 2, 1, 1])
-    with c1:
+    r2 = st.columns([3, 1, 1])
+    with r2[0]:
         proc = st.radio('Process', ['ALL', 'CS', 'MO', 'CO'], horizontal=True, key='calibration_process')
-    with c2:
-        reviewer = st.selectbox('Reviewer', ['ALL'] + reviewers, key='calibration_reviewer')
-    with c3:
+    with r2[1]:
         week_from = st.selectbox('From Week', weeks_all, index=0, key='calibration_week_from') if weeks_all else wmin
-    with c4:
+    with r2[2]:
         to_opts = [w for w in weeks_all if w >= week_from] or [week_from]
         week_to = st.selectbox('To Week', to_opts, index=len(to_opts) - 1, key='calibration_week_to') if weeks_all else wmax
 
     # ---- Apply filters ----
     fdf = df.copy()
+    if ysel != 'ALL':
+        fdf = fdf[fdf['_yr'] == int(ysel)]
+    if msel != 'ALL':
+        fdf = fdf[fdf['_mn'] == msel]
     if proc != 'ALL':
         fdf = fdf[fdf['process'] == proc]
     if reviewer != 'ALL':
@@ -3257,7 +3277,7 @@ def main():
     st.markdown("## " + choice)
 
     # ── inline Month + Week filter (every tab except those with their own period controls) ──
-    SELF_FILTERED = {"scorecard", "workRequests"}
+    SELF_FILTERED = {"scorecard", "workRequests", "calibration"}
     mopts = [m for m in MONTH_ORDER if "_month" in primary.columns and m in set(primary["_month"].dropna())]
     wopts = (sorted({int(w) for w in pd.to_numeric(primary["_week"], errors="coerce").dropna()})
              if "_week" in primary.columns and not primary.empty else [])
