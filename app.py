@@ -1219,29 +1219,24 @@ def render_calibration(df) -> None:
             width="stretch",
         )
 
-    # ---- Section Score Averages by Reviewer (grouped bars + overall line) ----
+    # ---- Avg Alignment Score by Reviewer ----
+    # Overall Score IS the calibration alignment (100 − variance) for every process,
+    # so a single 0-100 bar is comparable across CS / MO / CO. (The old stacked chart
+    # mixed in the 3 MO-only section scores, which double-counted to ~200 for MO and
+    # left CS reviewers flat because CS has no section breakdown.)
     rev_list = sorted(fdf['reviewerName'].dropna().unique())
 
-    def rd(key):
-        return [fdf[fdf['reviewerName'] == r][key].mean() for r in rev_list]
-
-    st.markdown('**Section Score Averages by Reviewer**')
-    sec_series = {
-        'Res. Execution': rd('resExec'),
-        'Bus. Logic': rd('busLogic'),
-        'Cust. Rights': rd('custRights'),
-        'Overall Score': rd('overallScore'),
-    }
-    sec_colors = {
-        'Res. Execution': '#4285F4',
-        'Bus. Logic': '#34A853',
-        'Cust. Rights': '#EA4335',
-        'Overall Score': '#FBBC04',
-    }
-    st.plotly_chart(
-        stacked_bar(rev_list, sec_series, colors=sec_colors),
-        width="stretch",
-    )
+    st.markdown('**Avg Alignment Score by Reviewer**')
+    al = [(r, fdf[fdf['reviewerName'] == r]['overallScore'].mean()) for r in rev_list]
+    al = [(r, v) for r, v in al if pd.notna(v)]
+    al.sort(key=lambda x: x[1], reverse=True)
+    if al:
+        st.plotly_chart(
+            hbar([r for r, _ in al], [round(v, 1) for _, v in al], color='#34A853'),
+            width="stretch",
+        )
+    else:
+        st.info('No alignment scores for this view')
 
     # ---- Reviewer Breakdown table ----
     st.markdown('**Reviewer Breakdown**')
@@ -1272,8 +1267,9 @@ def render_disputes(df) -> None:
     if df is None or df.empty:
         st.info('No data for this view'); return
 
-    SCOL = {'Accepted': '#137333', 'Non QA Error': '#1a73e8', 'Rejected': '#c5221f', 'Outside Window': '#e37400'}
-    STATUSES = ['Accepted', 'Non QA Error', 'Rejected', 'Outside Window']
+    SCOL = {'Accepted': '#137333', 'Non QA Error': '#1a73e8', 'Rejected': '#c5221f',
+            'Outside Window': '#e37400', 'Pending': '#9aa0a6'}
+    STATUSES = ['Accepted', 'Non QA Error', 'Rejected', 'Outside Window', 'Pending']
 
     c1, c2, c3, c4 = st.columns([3, 2, 2, 2])
     with c1:
@@ -1296,8 +1292,10 @@ def render_disputes(df) -> None:
     if dtype != 'ALL':
         fdf = fdf[fdf['disputeType'] == dtype]
 
-    # KPIs
+    # KPIs — rates are over DECIDED disputes only (Pending excluded), so they sum to 100%
     total = len(fdf)
+    pending = int((fdf['status'] == 'Pending').sum())
+    decided = total - pending
     accepted = len(fdf[fdf['status'].isin(['Accepted', 'Non QA Error'])])
     rejected = len(fdf[fdf['status'].isin(['Rejected', 'Outside Window'])])
     with_days = fdf[fdf['daysToResolve'].notna()]
@@ -1305,9 +1303,9 @@ def render_disputes(df) -> None:
     uniq = fdf['caseId'].nunique()
 
     kpi_row([
-        dict(label='Total Disputes', value=str(total), hint=f'{uniq} unique cases', color='blue'),
-        dict(label='Acceptance Rate', value=(f'{accepted/total*100:.1f}%' if total else '–'), hint='Accepted + Non QA Error', color='green'),
-        dict(label='Rejection Rate', value=(f'{rejected/total*100:.1f}%' if total else '–'), hint='Rejected + Outside Window', color='red'),
+        dict(label='Total Disputes', value=str(total), hint=f'{uniq} unique · {pending} pending', color='blue'),
+        dict(label='Acceptance Rate', value=(f'{accepted/decided*100:.1f}%' if decided else '–'), hint='Accepted + Non QA Error (of decided)', color='green'),
+        dict(label='Rejection Rate', value=(f'{rejected/decided*100:.1f}%' if decided else '–'), hint='Rejected + Outside Window (of decided)', color='red'),
         dict(label='Avg Days to Resolve', value=(f'{avg_days:.1f}d' if avg_days else '–'), hint='Dispute → resolved date', color='blue'),
     ])
 
@@ -3125,8 +3123,165 @@ def render_workrequests(df):
 
 
 # ───────────────────── navigation / main ─────────────────────
+# ───────────────────── Unified Team Scorecard (official weighted model) ─────────────────────
+# The 6-core + 3 extended QA team appear under many name spellings across sources;
+# fold every variant onto one canonical full name.
+_QA_CANON = {
+    'arif': 'Mohammed Arif', 'farzana': 'Farzana Begum H', 'nanaiah': 'Nanaiah B P',
+    'sunil': 'Sunil Kumar N', 'anand': 'Anandharaj Vasu', 'chandramalar': 'Chandramalar S',
+    'kavitha': 'Kavitha A', 'sasi': 'Sasi Kumar M', 'solomon': 'Solomon Sylvia Rajakumar',
+}
+
+
+def _canon_qa(name):
+    s = str(name or '').strip().lower()
+    if not s or s in ('nan', 'none'):
+        return None
+    for k, full in _QA_CANON.items():
+        if k in s:
+            return full
+    return str(name).strip()
+
+
+# Tenured (>6mo) model from the official scorecard: weight % and target.
+_SC_MODEL = {
+    'audit':   {'weight': 30, 'target': 100, 'label': 'Audit %'},
+    'calib':   {'weight': 40, 'target': 90,  'label': 'Calibration %'},
+    'dispute': {'weight': 10, 'target': 95,  'label': 'Dispute Accept %'},
+    'pi':      {'weight': 20, 'target': 4,   'label': 'PI / month'},
+}
+
+
+def _sc_year(s):
+    m = re.search(r'(20\d\d)', str(s))
+    return int(m.group(1)) if m else None
+
+
+def render_team_scorecard(sc, cal, wr):
+    st.caption('Unified per-QA scorecard — official **Tenured (>6mo)** weighted model: '
+               'Audit 30% · Calibration 40% · Dispute Acceptance 10% · Process Improvements 20%. '
+               'Audit % and Dispute Acceptance % come from the scorecard sheet (Jan–Apr); '
+               'Calibration % and Process Improvements are computed live. '
+               'Documentation-error −5% detractor not applied in v1.')
+
+    sc = sc.copy() if sc is not None else pd.DataFrame()
+    cal = cal.copy() if cal is not None else pd.DataFrame()
+    wr = wr.copy() if wr is not None else pd.DataFrame()
+
+    months_avail = [m for m in MONTH_ORDER
+                    if any('_month' in d.columns and m in set(d['_month'].dropna())
+                           for d in (sc, cal, wr))]
+    c1, c2 = st.columns([1, 3])
+    with c1:
+        year = st.selectbox('Year', [2026, 2025], index=0, key='team_year')
+    with c2:
+        msel = st.multiselect('Month', months_avail, key='team_month')
+
+    def _filt(df, datecol=None):
+        if df is None or df.empty:
+            return df
+        out = df
+        if datecol and datecol in out.columns:
+            out = out[out[datecol].map(_sc_year) == year]
+        elif 'year' in out.columns:
+            out = out[pd.to_numeric(out['year'], errors='coerce') == year]
+        if msel and '_month' in out.columns:
+            out = out[out['_month'].isin(msel)]
+        return out
+
+    scf, calf, wrf = _filt(sc), _filt(cal, 'date'), _filt(wr)
+
+    if msel:
+        n_months = len(msel)
+    elif wrf is not None and not wrf.empty and '_month' in wrf.columns and wrf['_month'].notna().any():
+        n_months = max(1, int(wrf['_month'].nunique()))
+    else:
+        n_months = 1
+
+    # canonical QA set across all contributing sources — restricted to the known
+    # team roster so calibration SMEs/TLs (e.g. 'rramchandani', 'sm') don't leak in
+    known = set(_QA_CANON.values())
+    qas = set()
+    for d, col in ((scf, 'qaName'), (calf, 'reviewerName'), (wrf, 'raisedBy')):
+        if d is not None and not d.empty and col in d.columns:
+            qas |= {q for q in (_canon_qa(x) for x in d[col]) if q in known}
+
+    def _mean(df, col, who, namecol):
+        if df is None or df.empty or col not in df.columns or namecol not in df.columns:
+            return None
+        sub = pd.to_numeric(df[df[namecol].map(_canon_qa) == who][col], errors='coerce').dropna()
+        return round(sub.mean(), 1) if len(sub) else None
+
+    rows = []
+    for qa in sorted(qas):
+        audit = _mean(scf, 'auditTargetPct', qa, 'qaName')
+        calib = _mean(calf, 'overallScore', qa, 'reviewerName')
+        disp = _mean(scf, 'disputeAcceptPct', qa, 'qaName')
+        pi_count = int((wrf['raisedBy'].map(_canon_qa) == qa).sum()) \
+            if (wrf is not None and not wrf.empty and 'raisedBy' in wrf.columns) else 0
+        pi_pm = round(pi_count / n_months, 1)
+
+        ach = {
+            'audit':   (min(audit / 100, 1) * 100) if audit is not None else None,
+            'calib':   (min(calib / 90, 1) * 100) if calib is not None else None,
+            'dispute': (min(disp / 95, 1) * 100) if disp is not None else None,
+            'pi':      min(pi_pm / 4, 1) * 100,
+        }
+        num = den = 0.0
+        for k, a in ach.items():
+            if a is not None:
+                num += a * _SC_MODEL[k]['weight']
+                den += _SC_MODEL[k]['weight']
+        overall = round(num / den, 1) if den else None
+
+        rows.append({
+            'QA': qa, 'Overall Score': overall,
+            'Audit %': audit, 'Calibration %': calib, 'Dispute Accept %': disp,
+            'Process Improv (#)': pi_count, 'PI / month': pi_pm,
+        })
+
+    if not rows:
+        st.info('No data for this view')
+        return
+    tdf = (pd.DataFrame(rows)
+           .sort_values('Overall Score', ascending=False, na_position='last')
+           .reset_index(drop=True))
+
+    vo = pd.to_numeric(tdf['Overall Score'], errors='coerce').dropna()
+    vc = pd.to_numeric(tdf['Calibration %'], errors='coerce').dropna()
+    period_hint = (', '.join(msel) if msel else 'all months') + f' · {year}'
+    kpi_row([
+        dict(label='QAs Scored', value=str(len(tdf)), hint=period_hint, color='blue'),
+        dict(label='Team Avg Score', value=(f'{vo.mean():.1f}%' if len(vo) else '–'),
+             hint='Weighted model', color='green'),
+        dict(label='Top Performer', value=(tdf.iloc[0]['QA'] if len(vo) else '–'),
+             hint=(f"{tdf.iloc[0]['Overall Score']:.1f}%" if len(vo) else ''), color='green'),
+        dict(label='Avg Calibration', value=(f'{vc.mean():.1f}%' if len(vc) else '–'),
+             hint='Live · target 90%', color='blue'),
+    ])
+
+    st.markdown('**Overall QA Score**')
+    bar = tdf.dropna(subset=['Overall Score'])
+    if not bar.empty:
+        st.plotly_chart(hbar(list(bar['QA']), [round(v, 1) for v in bar['Overall Score']],
+                             color='#1a73e8'), width='stretch')
+
+    st.markdown('**Scorecard Detail**')
+    show_table(
+        tdf,
+        pct_cols=('Audit %', 'Calibration %', 'Dispute Accept %'),
+        bar_cols=('Overall Score',),
+        int_cols=('Process Improv (#)',),
+    )
+    st.caption('Targets (Tenured): Audit 100% · Calibration 90% · Dispute Acceptance 95% · '
+               'Process Improvements 4/month. Each KPI achievement is capped at 100%; '
+               'Overall = weighted average of the KPIs available for the selected period '
+               '(missing KPIs are dropped and the remaining weights rescaled).')
+
+
 TABS = [
     ("QA Scorecard",    "scorecard",   render_scorecard),
+    ("Team Scorecard",  "team",        render_team_scorecard),
     ("Work Requests",   "workRequests", render_workrequests),
     ("WoW Calibration", "calibration", render_calibration),
     ("Disputes",        "disputes",    render_disputes),
@@ -3268,6 +3423,8 @@ def main():
     if cur_key == "moa":
         d_reg, d_deal = get("moReg"), get("moDeal")
         primary = d_reg if d_reg is not None else pd.DataFrame()
+    elif cur_key == "team":
+        primary = pd.DataFrame()      # aggregates several sources inside its render
     else:
         d_cur = get(cur_key)
         primary = d_cur if d_cur is not None else pd.DataFrame()
@@ -3275,7 +3432,7 @@ def main():
     st.markdown("## " + choice)
 
     # ── inline Month + Week filter (every tab except those with their own period controls) ──
-    SELF_FILTERED = {"scorecard", "workRequests", "calibration"}
+    SELF_FILTERED = {"scorecard", "workRequests", "calibration", "team"}
     mopts = [m for m in MONTH_ORDER if "_month" in primary.columns and m in set(primary["_month"].dropna())]
     wopts = (sorted({int(w) for w in pd.to_numeric(primary["_week"], errors="coerce").dropna()})
              if "_week" in primary.columns and not primary.empty else [])
@@ -3333,6 +3490,8 @@ def main():
         render_moa(pf(d_reg), pf(d_deal))
     elif cur_key == "scorecard":
         render_scorecard(d_cur, get("workRequests"))
+    elif cur_key == "team":
+        render_team_scorecard(get("scorecard"), get("calibration"), get("workRequests"))
     else:
         fn = next(f for (lbl, k, f) in TABS if k == cur_key)
         fn(pf(d_cur))
