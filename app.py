@@ -4,13 +4,73 @@ Run with:  streamlit run app.py
 """
 import os
 import re
+import base64
 import math as _math
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 from qa_helpers import *
 
-st.set_page_config(page_title="QA Dashboard", layout="wide")
+st.set_page_config(page_title="Groupon QA Dashboard", page_icon="🟢", layout="wide")
+
+
+_LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "groupon_logo.png")
+
+
+def _logo_html():
+    """Sidebar header: the official Groupon logo (assets/groupon_logo.png) if
+    present, else a clean uppercase wordmark fallback. Subtitle below."""
+    try:
+        with open(_LOGO_PATH, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode()
+        return ("<div class='qa-brand qa-brand-col'>"
+                f"<img class='qa-logo-img' src='data:image/png;base64,{b64}' alt='Groupon'/>"
+                "<span class='qa-sub'>QA Dashboard</span></div>")
+    except Exception:
+        return ("<div class='qa-brand'>"
+                "<span class='qa-logo'>GROUPON<sup>&reg;</sup></span>"
+                "<span class='qa-sub'>QA Dashboard</span></div>")
+
+
+def _inject_theme(dark: bool):
+    """Inject the active light / dark-futuristic theme. Restyles the app shell,
+    sidebar, KPI cards, headers and nav; data tables follow Streamlit's engine."""
+    if dark:
+        v = dict(
+            app="linear-gradient(160deg,#0a0e1a 0%,#0f1729 55%,#0b1020 100%)",
+            sidebar="#0b1020", card="rgba(255,255,255,0.045)", cardbd="rgba(255,255,255,0.10)",
+            cardsh="0 0 22px rgba(83,163,24,0.10)", text="#e6ebf5", muted="#9aa4b8",
+            accent="#7AC943", blur="backdrop-filter:blur(8px);")
+    else:
+        v = dict(
+            app="#f5f7fa", sidebar="#ffffff", card="#ffffff", cardbd="rgba(0,0,0,0.06)",
+            cardsh="0 1px 3px rgba(0,0,0,0.10)", text="#1f2937", muted="#5f6368",
+            accent="#53A318", blur="")
+    st.markdown(
+        "<style>"
+        "@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');"
+        "html,body,[class*='css'],.stApp{font-family:'Inter',sans-serif;}"
+        f".stApp{{background:{v['app']};}}"
+        "[data-testid='stHeader']{background:rgba(0,0,0,0);}"
+        f"[data-testid='stSidebar']{{background:{v['sidebar']};border-right:0.5px solid {v['cardbd']};}}"
+        f".stApp,.stMarkdown,p,span,label,li{{color:{v['text']};}}"
+        f"h1,h2,h3,h4{{color:{v['text']}!important;font-family:'Inter',sans-serif;font-weight:600;letter-spacing:-0.3px;}}"
+        ".qa-brand{display:flex;align-items:baseline;gap:8px;padding:8px 4px 16px;}"
+        ".qa-brand-col{flex-direction:column;align-items:flex-start;gap:3px;}"
+        ".qa-logo-img{width:150px;height:auto;display:block;}"
+        f".qa-logo{{font-size:24px;font-weight:700;color:{v['accent']};letter-spacing:0.5px;}}"
+        ".qa-logo sup{font-size:10px;}"
+        f".qa-sub{{font-size:12px;color:{v['muted']};letter-spacing:0.3px;}}"
+        f".qa-kpi{{background:{v['card']};border:0.5px solid {v['cardbd']};border-radius:14px;"
+        f"padding:16px 18px;min-height:96px;box-shadow:{v['cardsh']};{v['blur']}}}"
+        f".qa-kpi-label{{font-size:11px;font-weight:600;color:{v['muted']};text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;}}"
+        ".qa-kpi-value{font-size:28px;font-weight:700;line-height:1;}"
+        f".qa-kpi-hint{{font-size:11px;color:{v['muted']};margin-top:6px;}}"
+        f"[data-testid='stSidebar'] .stRadio label p{{color:{v['text']};}}"
+        f"[data-testid='stMetricValue']{{color:{v['accent']};}}"
+        "</style>",
+        unsafe_allow_html=True,
+    )
 
 
 def _to_float(x):
@@ -3404,7 +3464,12 @@ def load_source(key):
 
 
 def main():
-    st.sidebar.markdown("## 📊 QA Dashboard")
+    dark = st.session_state.get("__dark", False)
+    _inject_theme(dark)
+    set_chart_theme(dark)
+
+    st.sidebar.markdown(_logo_html(), unsafe_allow_html=True)
+    st.sidebar.toggle("🌙 Dark mode", key="__dark")
     choice = st.sidebar.radio("Section", [t[0] for t in TABS], key="__nav")
     cur_key = next((k for (lbl, k, _) in TABS if lbl == choice), None)
     errors = {}

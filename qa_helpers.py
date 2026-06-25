@@ -149,8 +149,19 @@ FILES = {
 }
 
 PCOL = {"CS": "#4285F4", "MO": "#34A853", "CO": "#FBBC04"}
-_KPI_COLORS = {"blue": "#1a73e8", "green": "#137333", "orange": "#e37400",
-               "red": "#c5221f", "purple": "#7b1fa2"}
+_KPI_COLORS = {"blue": "#1a73e8", "green": "#2e9e2e", "orange": "#e37400",
+               "red": "#e0483b", "purple": "#7b1fa2"}
+
+# Chart theme — mutated by set_chart_theme() each run so Plotly figures match
+# the active light / dark mode (canvas can't read CSS variables).
+CHART_THEME = {"font": "#3c4043", "grid": "#e8eaed", "line": "#ffffff"}
+
+
+def set_chart_theme(dark: bool):
+    if dark:
+        CHART_THEME.update(font="#c7d0e0", grid="rgba(255,255,255,0.10)", line="#0f1729")
+    else:
+        CHART_THEME.update(font="#3c4043", grid="#e8eaed", line="#ffffff")
 
 # ──────────────────────────────────────────────────────────────────────
 # WORKBOOK READER  (no credentials)
@@ -276,18 +287,17 @@ def top_val(values):
 # UI HELPERS
 # ──────────────────────────────────────────────────────────────────────
 def kpi_row(items):
-    """items: list of dict(label, value, hint='', color='blue')."""
+    """items: list of dict(label, value, hint='', color='blue'). Card styling
+    comes from the .qa-kpi CSS injected per-theme in app.py."""
     cols = st.columns(len(items))
     for c, it in zip(cols, items):
         color = _KPI_COLORS.get(it.get("color", "blue"), "#1a73e8")
         with c:
             st.markdown(
-                f"""<div style="background:#fff;border-radius:8px;padding:16px 18px;
-                       box-shadow:0 1px 3px rgba(0,0,0,.12);min-height:96px">
-                  <div style="font-size:11px;font-weight:600;color:#5f6368;
-                       text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">{it['label']}</div>
-                  <div style="font-size:28px;font-weight:700;line-height:1;color:{color}">{it['value']}</div>
-                  <div style="font-size:11px;color:#5f6368;margin-top:6px">{it.get('hint','')}</div>
+                f"""<div class="qa-kpi">
+                  <div class="qa-kpi-label">{it['label']}</div>
+                  <div class="qa-kpi-value" style="color:{color}">{it['value']}</div>
+                  <div class="qa-kpi-hint">{it.get('hint','')}</div>
                 </div>""",
                 unsafe_allow_html=True,
             )
@@ -297,21 +307,21 @@ def _style(fig, height=250, legend=True):
     fig.update_layout(
         height=height,
         margin=dict(l=8, r=8, t=8, b=8),
-        font=dict(size=11),
-        plot_bgcolor="white",
-        paper_bgcolor="white",
+        font=dict(size=11, color=CHART_THEME["font"]),
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
         showlegend=legend,
         legend=dict(font=dict(size=10)),
     )
     fig.update_xaxes(showgrid=False)
-    fig.update_yaxes(gridcolor="#e8eaed")
+    fig.update_yaxes(gridcolor=CHART_THEME["grid"])
     return fig
 
 
 def donut(labels, values, colors=None):
     fig = go.Figure(go.Pie(
         labels=labels, values=values, hole=0.55,
-        marker=dict(colors=colors, line=dict(color="#fff", width=2)),
+        marker=dict(colors=colors, line=dict(color=CHART_THEME["line"], width=2)),
         textinfo="value",
         hovertemplate="%{label}: %{value} (%{percent})<extra></extra>",
     ))
