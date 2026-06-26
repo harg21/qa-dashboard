@@ -3339,9 +3339,148 @@ def render_team_scorecard(sc, cal, wr):
                '(missing KPIs are dropped and the remaining weights rescaled).')
 
 
+# ───────────────────── Agent Controllable Error Report ─────────────────────
+# RAG bands for the agent-controllable error rate.
+_BAND_LABELS = ['Excellent', 'Good', 'Watch', 'Action']
+_BAND_COLORS = {'Excellent': '#2e9e2e', 'Good': '#e8a400', 'Watch': '#e37400', 'Action': '#e0483b'}
+
+
+def _err_extract(df, agent_col, source, controllable_match='agent error'):
+    """One record per audited row: agent, controllable(bool), week, month, source.
+    controllable = error category contains `controllable_match` (default any
+    'agent error') but never 'non-agent'."""
+    if df is None or df.empty or agent_col not in df.columns:
+        return pd.DataFrame(columns=['agent', 'controllable', 'week', 'month', 'source'])
+    ec = df['errorCategory'].astype(str).str.lower() if 'errorCategory' in df.columns else pd.Series([''] * len(df))
+    out = pd.DataFrame({
+        'agent': df[agent_col].astype(str).str.strip(),
+        'controllable': ec.str.contains(controllable_match, na=False) & ~ec.str.contains('non-agent', na=False),
+        'week': df['_week'] if '_week' in df.columns else pd.NA,
+        'month': df['_month'] if '_month' in df.columns else None,
+    })
+    out['source'] = source
+    return out[out['agent'].ne('') & out['agent'].str.lower().ne('nan')]
+
+
+def render_agent_errors(cara, cts, esc, gor):
+    st.caption('Agent-controllable error rate = audits flagged "Agent Error" ÷ all audited '
+               'cases, per agent. Sources: CR Agent Audits, Cost to Serve, Escalation Rejected, '
+               'GO Recovery. These are targeted audits, so rates run high — tune the band cutoffs below.')
+
+    parts = [
+        _err_extract(cara, 'agent', 'CR Agent Audits'),
+        _err_extract(cts, 'agent', 'Cost to Serve'),
+        _err_extract(gor, 'agentName', 'GO Recovery'),
+        # Escalation is dual-agent: CS agent owns "CS - Agent Error", MO agent owns "MO - Agent Error"
+        _err_extract(esc, 'csAgent', 'Escalation (CS)', 'cs - agent error'),
+        _err_extract(esc, 'moAgent', 'Escalation (MO)', 'mo - agent error'),
+    ]
+    recs = pd.concat([p for p in parts if p is not None and not p.empty], ignore_index=True)
+    if recs.empty:
+        st.info('No data for this view')
+        return
+
+    # ---- filters ----
+    all_src = sorted(recs['source'].unique())
+    months = [m for m in MONTH_ORDER if m in set(recs['month'].dropna())]
+    f = st.columns([3, 2, 1.4])
+    with f[0]:
+        ssel = st.multiselect('Source', all_src, key='ae_src')
+    with f[1]:
+        msel = st.multiselect('Month', months, key='ae_month')
+    with f[2]:
+        min_aud = st.number_input('Min audits', min_value=1, max_value=200, value=5, step=1, key='ae_min')
+
+    t = st.columns([1, 1, 1, 3])
+    with t[0]:
+        b1 = st.number_input('🟢 below %', 1.0, 95.0, 5.0, 1.0, key='ae_b1')
+    with t[1]:
+        b2 = st.number_input('🟡 below %', 1.0, 97.0, 10.0, 1.0, key='ae_b2')
+    with t[2]:
+        b3 = st.number_input('🟠 below %', 1.0, 99.0, 15.0, 1.0, key='ae_b3')
+    b1, b2, b3 = sorted([b1, b2, b3])
+
+    def _band(r):
+        return 'Excellent' if r < b1 else 'Good' if r < b2 else 'Watch' if r < b3 else 'Action'
+
+    fdf = recs
+    if ssel:
+        fdf = fdf[fdf['source'].isin(ssel)]
+    if msel:
+        fdf = fdf[fdf['month'].isin(msel)]
+    if fdf.empty:
+        st.info('No data for this view')
+        return
+
+    # ---- per-agent aggregation ----
+    g = fdf.groupby('agent').agg(audits=('controllable', 'size'),
+                                 errors=('controllable', 'sum')).reset_index()
+    g['errors'] = g['errors'].astype(int)
+    g = g[g['audits'] >= min_aud]
+    if g.empty:
+        st.info(f'No agents with ≥{min_aud} audits in this view')
+        return
+    g['Error %'] = (g['errors'] / g['audits'] * 100).round(1)
+    g['Band'] = g['Error %'].map(_band)
+    g = g.sort_values('Error %', ascending=False).reset_index(drop=True)
+
+    # ---- KPIs ----
+    tot_aud = int(fdf.shape[0])
+    tot_err = int(fdf['controllable'].sum())
+    overall = round(tot_err / tot_aud * 100, 1) if tot_aud else 0.0
+    o_color = 'green' if overall < b1 else ('orange' if overall < b3 else 'red')
+    in_red = int((g['Error %'] >= b3).sum())
+    kpi_row([
+        dict(label='Overall Error Rate', value=f'{overall:.1f}%', hint=_band(overall), color=o_color),
+        dict(label=f'Agents in Red ({b3:g}%+)', value=str(in_red), hint=f'of {len(g)} agents', color='red' if in_red else 'green'),
+        dict(label='Total Audits', value=f'{tot_aud:,}', hint=f'≥{min_aud} per agent shown', color='blue'),
+        dict(label='Agent Errors', value=f'{tot_err:,}', hint='controllable', color='orange'),
+    ])
+
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        st.markdown('**Agents by band**')
+        bcounts = [int((g['Band'] == b).sum()) for b in _BAND_LABELS]
+        labels = [f'🟢 <{b1:g}%', f'🟡 {b1:g}–{b2:g}%', f'🟠 {b2:g}–{b3:g}%', f'🔴 {b3:g}%+']
+        st.plotly_chart(donut(labels, bcounts, [_BAND_COLORS[b] for b in _BAND_LABELS]), width='stretch')
+    with c2:
+        st.markdown('**Weekly controllable error rate**')
+        wk = fdf.dropna(subset=['week']).copy()
+        wk['week'] = pd.to_numeric(wk['week'], errors='coerce')
+        wk = wk.dropna(subset=['week'])
+        weeks = sorted(wk['week'].unique())
+        labels = [f'Wk {int(w)}' for w in weeks]
+        vals = [round(wk[wk['week'] == w]['controllable'].mean() * 100, 1) for w in weeks]
+        ymax = max(30, (max(vals) if vals else 0) + 5)
+        fig = go.Figure()
+        for y0, y1, col in [(0, b1, '#2e9e2e'), (b1, b2, '#e8a400'), (b2, b3, '#e37400'), (b3, ymax, '#e0483b')]:
+            fig.add_hrect(y0=y0, y1=y1, fillcolor=col, opacity=0.08, line_width=0)
+        fig.add_scatter(x=labels, y=vals, mode='lines+markers', line=dict(color='#1a73e8', width=2))
+        fig.update_layout(height=250, margin=dict(l=8, r=8, t=8, b=8),
+                          font=dict(size=11, color=CHART_THEME["font"]),
+                          plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", showlegend=False)
+        fig.update_xaxes(showgrid=False)
+        fig.update_yaxes(gridcolor=CHART_THEME["grid"], ticksuffix='%', range=[0, ymax])
+        st.plotly_chart(fig, width='stretch')
+
+    # ---- per-agent table ----
+    st.markdown('**Agent breakdown**')
+    show_table(
+        g.rename(columns={'agent': 'Agent', 'audits': 'Audits', 'errors': 'Agent Errors'})[
+            ['Agent', 'Audits', 'Agent Errors', 'Error %', 'Band']],
+        pct_cols=('Error %',),
+        bar_cols=(),
+        int_cols=('Audits', 'Agent Errors'),
+    )
+    st.caption('Escalation Rejected is dual-agent: each case audits both the CS agent (owns '
+               '"CS - Agent Error") and the MO agent (owns "MO - Agent Error"). Agents below the '
+               'min-audits floor are hidden so tiny samples don\'t skew the rate.')
+
+
 TABS = [
     ("QA Scorecard",    "scorecard",   render_scorecard),
     ("Team Scorecard",  "team",        render_team_scorecard),
+    ("Agent Errors",    "agentErr",    render_agent_errors),
     ("Work Requests",   "workRequests", render_workrequests),
     ("WoW Calibration", "calibration", render_calibration),
     ("Disputes",        "disputes",    render_disputes),
@@ -3488,7 +3627,7 @@ def main():
     if cur_key == "moa":
         d_reg, d_deal = get("moReg"), get("moDeal")
         primary = d_reg if d_reg is not None else pd.DataFrame()
-    elif cur_key == "team":
+    elif cur_key in ("team", "agentErr"):
         primary = pd.DataFrame()      # aggregates several sources inside its render
     else:
         d_cur = get(cur_key)
@@ -3497,7 +3636,7 @@ def main():
     st.markdown("## " + choice)
 
     # ── inline Month + Week filter (every tab except those with their own period controls) ──
-    SELF_FILTERED = {"scorecard", "workRequests", "calibration", "team"}
+    SELF_FILTERED = {"scorecard", "workRequests", "calibration", "team", "agentErr"}
     mopts = [m for m in MONTH_ORDER if "_month" in primary.columns and m in set(primary["_month"].dropna())]
     wopts = (sorted({int(w) for w in pd.to_numeric(primary["_week"], errors="coerce").dropna()})
              if "_week" in primary.columns and not primary.empty else [])
@@ -3557,6 +3696,8 @@ def main():
         render_scorecard(d_cur, get("workRequests"))
     elif cur_key == "team":
         render_team_scorecard(get("scorecard"), get("calibration"), get("workRequests"))
+    elif cur_key == "agentErr":
+        render_agent_errors(get("cara"), get("cts"), get("esc"), get("gor"))
     else:
         fn = next(f for (lbl, k, f) in TABS if k == cur_key)
         fn(pf(d_cur))
