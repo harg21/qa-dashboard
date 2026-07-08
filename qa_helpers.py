@@ -60,12 +60,18 @@ LIVE_KEY_MAP = {
     "coa":         "coAudits",
     "scorecard":   "scorecard",
     "workRequests": "workRequests",
+    "qaMetrics":   "qaMetrics",
+    "docErrors":   "docErrors",
 }
+
+
+# Heavy server-side aggregations need a longer read timeout than the default.
+_SLOW_SRC = {"qaMetrics": 340, "superAudit": 200}
 
 
 def _fetch_one(url, js_key):
     sep = "&" if "?" in url else "?"
-    resp = requests.get(url + sep + "api=1&src=" + js_key, timeout=150)
+    resp = requests.get(url + sep + "api=1&src=" + js_key, timeout=_SLOW_SRC.get(js_key, 150))
     resp.raise_for_status()
     text = resp.text
     if text.lstrip()[:1] == "<":

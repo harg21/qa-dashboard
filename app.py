@@ -3183,9 +3183,7 @@ def render_workrequests(df):
 
 
 # ───────────────────── navigation / main ─────────────────────
-# ───────────────────── Unified Team Scorecard (official weighted model) ─────────────────────
-# The 6-core + 3 extended QA team appear under many name spellings across sources;
-# fold every variant onto one canonical full name.
+# ───────────────────── Unified Team Scorecard (official weighted model, bottom-up) ─────────────────────
 _QA_CANON = {
     'arif': 'Mohammed Arif', 'farzana': 'Farzana Begum H', 'nanaiah': 'Nanaiah B P',
     'sunil': 'Sunil Kumar N', 'anand': 'Anandharaj Vasu', 'chandramalar': 'Chandramalar S',
@@ -3200,16 +3198,7 @@ def _canon_qa(name):
     for k, full in _QA_CANON.items():
         if k in s:
             return full
-    return str(name).strip()
-
-
-# Tenured (>6mo) model from the official scorecard: weight % and target.
-_SC_MODEL = {
-    'audit':   {'weight': 30, 'target': 100, 'label': 'Audit %'},
-    'calib':   {'weight': 40, 'target': 90,  'label': 'Calibration %'},
-    'dispute': {'weight': 10, 'target': 95,  'label': 'Dispute Accept %'},
-    'pi':      {'weight': 20, 'target': 4,   'label': 'PI / month'},
-}
+    return None
 
 
 def _sc_year(s):
@@ -3217,126 +3206,180 @@ def _sc_year(s):
     return int(m.group(1)) if m else None
 
 
-def render_team_scorecard(sc, cal, wr):
-    st.caption('Unified per-QA scorecard — official **Tenured (>6mo)** weighted model: '
-               'Audit 30% · Calibration 40% · Dispute Acceptance 10% · Process Improvements 20%. '
-               'Audit % and Dispute Acceptance % come from the scorecard sheet (Jan–Apr); '
-               'Calibration % and Process Improvements are computed live. '
-               'Documentation-error −5% detractor not applied in v1.')
+# Each QA's primary process (drives the May-2026 per-process weights).
+_QA_PROC = {
+    'Mohammed Arif': 'CS', 'Farzana Begum H': 'CS', 'Nanaiah B P': 'CS', 'Sunil Kumar N': 'CS',
+    'Anandharaj Vasu': 'CS', 'Chandramalar S': 'CS', 'Kavitha A': 'MO', 'Sasi Kumar M': 'MO',
+    'Solomon Sylvia Rajakumar': 'CO',
+}
+# New (<6-month) windows — (start_year, start_month, end_year, end_month), inclusive.
+_QA_NEW = {
+    'Mohammed Arif': (2025, 7, 2025, 12), 'Farzana Begum H': (2025, 7, 2025, 12),
+    'Sunil Kumar N': (2025, 7, 2025, 12), 'Nanaiah B P': (2025, 7, 2025, 12),
+    'Sasi Kumar M': (2026, 1, 2026, 6), 'Kavitha A': (2026, 1, 2026, 6),
+    'Anandharaj Vasu': (2026, 2, 2026, 7), 'Chandramalar S': (2026, 2, 2026, 7),
+    'Solomon Sylvia Rajakumar': (2026, 4, 2026, 9),
+}
+# Official model — KPI: (weight%, target).  'apr' = 2025–Apr 2026 (Doc Errors is a KPI);
+# 'may' = May 2026+ (Process Improvements replaces it; doc errors → −5% detractor).
+_MODEL_APR = {
+    'New':     {'audit': (30, 100), 'dispute': (30, 95), 'calib': (40, 85)},
+    'Tenured': {'audit': (20, 100), 'dispute': (30, 99), 'calib': (30, 90), 'doc': (20, 98)},
+}
+_MODEL_MAY = {
+    'CS': {'New':     {'audit': (30, 100), 'dispute': (10, 90), 'calib': (40, 85), 'pi': (20, 4)},
+           'Tenured': {'audit': (20, 100), 'dispute': (10, 95), 'calib': (30, 90), 'pi': (20, 4)}},
+    'MO': {'New':     {'audit': (30, 100), 'dispute': (10, 90), 'calib': (40, 85), 'pi': (20, 4)},
+           'Tenured': {'audit': (20, 100), 'dispute': (30, 95), 'calib': (30, 90), 'pi': (20, 4)}},
+    'CO': {'New':     {'audit': (30, 100), 'dispute': (30, 90), 'calib': (40, 85), 'pi': (20, 4)},
+           'Tenured': {'audit': (20, 100), 'dispute': (30, 95), 'calib': (30, 90), 'pi': (20, 4)}},
+}
+_MI = {m: i + 1 for i, m in enumerate(MONTH_ORDER)}
 
-    sc = sc.copy() if sc is not None else pd.DataFrame()
+
+def _is_new(qa, y, mi):
+    w = _QA_NEW.get(qa)
+    return bool(w) and (y, mi) >= (w[0], w[1]) and (y, mi) <= (w[2], w[3])
+
+
+def _sc_period(y, mi):
+    return 'may' if (y > 2026 or (y == 2026 and mi >= 5)) else 'apr'
+
+
+def render_team_scorecard(qm, cal, wr):
+    st.caption('Per-QA weighted scorecard, computed **bottom-up from the live data** '
+               '(audits, disputes, calibration, work requests + documentation errors) — no longer '
+               'tied to the collated scorecard sheet. Weights/targets follow the official model, '
+               'applied **per-QA, per-month** by tenure and period (Jan–Apr weights Documentation '
+               'Errors; May-onward swaps in Process Improvements + a −5% doc-error detractor).')
+
+    qm = qm.copy() if qm is not None else pd.DataFrame()
     cal = cal.copy() if cal is not None else pd.DataFrame()
     wr = wr.copy() if wr is not None else pd.DataFrame()
+    if qm.empty or 'qa' not in qm.columns:
+        st.info('No data for this view')
+        return
 
-    months_avail = [m for m in MONTH_ORDER
-                    if any('_month' in d.columns and m in set(d['_month'].dropna())
-                           for d in (sc, cal, wr))]
+    qm['qa'] = qm['qa'].map(_canon_qa)
+    qm = qm[qm['qa'].notna()]
+    qm['year'] = pd.to_numeric(qm['year'], errors='coerce')
+
+    if not cal.empty and 'reviewerName' in cal.columns:
+        cal['qa'] = cal['reviewerName'].map(_canon_qa)
+        cal = cal[cal['qa'].notna()].copy()
+        cal['_y'] = cal['date'].map(_sc_year)
+        cal['_m'] = cal['date'].map(_month_name)
+        cal['_os'] = pd.to_numeric(cal['overallScore'], errors='coerce')
+    if not wr.empty and 'raisedBy' in wr.columns:
+        wr['qa'] = wr['raisedBy'].map(_canon_qa)
+        wr = wr[wr['qa'].notna()].copy()
+        wr['_y'] = pd.to_numeric(wr['year'], errors='coerce')
+        wr['_m'] = pd.to_numeric(wr['month'], errors='coerce').map(
+            lambda n: MONTH_ORDER[int(n) - 1] if pd.notna(n) and 1 <= int(n) <= 12 else None)
+
+    # ---- filters ----
+    years = sorted({int(y) for y in qm['year'].dropna()})
+    months_avail = [m for m in MONTH_ORDER if m in set(qm['month'].dropna())]
     c1, c2 = st.columns([1, 3])
     with c1:
-        year = st.selectbox('Year', [2026, 2025], index=0, key='team_year')
+        yopt = ['ALL'] + [str(y) for y in years]
+        ysel = st.selectbox('Year', yopt, index=(yopt.index('2026') if '2026' in yopt else 0), key='team_year')
     with c2:
         msel = st.multiselect('Month', months_avail, key='team_month')
 
-    def _filt(df, datecol=None):
-        if df is None or df.empty:
-            return df
-        out = df
-        if datecol and datecol in out.columns:
-            out = out[out[datecol].map(_sc_year) == year]
-        elif 'year' in out.columns:
-            out = out[pd.to_numeric(out['year'], errors='coerce') == year]
-        if msel and '_month' in out.columns:
-            out = out[out['_month'].isin(msel)]
-        return out
+    def _keep(y, m):
+        return (ysel == 'ALL' or y == int(ysel)) and (not msel or m in msel)
 
-    scf, calf, wrf = _filt(sc), _filt(cal, 'date'), _filt(wr)
-
-    if msel:
-        n_months = len(msel)
-    elif wrf is not None and not wrf.empty and '_month' in wrf.columns and wrf['_month'].notna().any():
-        n_months = max(1, int(wrf['_month'].nunique()))
-    else:
-        n_months = 1
-
-    # canonical QA set across all contributing sources — restricted to the known
-    # team roster so calibration SMEs/TLs (e.g. 'rramchandani', 'sm') don't leak in
-    known = set(_QA_CANON.values())
-    qas = set()
-    for d, col in ((scf, 'qaName'), (calf, 'reviewerName'), (wrf, 'raisedBy')):
-        if d is not None and not d.empty and col in d.columns:
-            qas |= {q for q in (_canon_qa(x) for x in d[col]) if q in known}
-
-    def _mean(df, col, who, namecol):
-        if df is None or df.empty or col not in df.columns or namecol not in df.columns:
+    def _calib(qa, y, m):
+        if cal.empty or '_os' not in cal.columns:
             return None
-        sub = pd.to_numeric(df[df[namecol].map(_canon_qa) == who][col], errors='coerce').dropna()
-        return round(sub.mean(), 1) if len(sub) else None
+        s = cal[(cal['qa'] == qa) & (cal['_y'] == y) & (cal['_m'] == m)]['_os'].dropna()
+        return round(s.mean(), 1) if len(s) else None
+
+    def _pi(qa, y, m):
+        if wr.empty or '_m' not in wr.columns:
+            return 0
+        return int(((wr['qa'] == qa) & (wr['_y'] == y) & (wr['_m'] == m)).sum())
+
+    # ---- per QA-month score ----
+    per_qa = {}
+    for _, r in qm.iterrows():
+        qa, yr, mo = r['qa'], r['year'], r['month']
+        if pd.isna(yr) or not mo or not _keep(int(yr), mo):
+            continue
+        y, mi = int(yr), _MI.get(mo, 0)
+        audits, upheld, docs = int(r['audits']), int(r['disputesUpheld']), int(r['docErrors'])
+        tenure = 'New' if _is_new(qa, y, mi) else 'Tenured'
+        period = _sc_period(y, mi)
+        model = _MODEL_APR[tenure] if period == 'apr' else _MODEL_MAY[_QA_PROC.get(qa, 'CS')][tenure]
+
+        disp_pct = round((1 - upheld / audits) * 100, 1) if audits else None
+        doc_pct = round((1 - docs / audits) * 100, 1) if audits else None
+        actual = {'audit': 100.0, 'dispute': disp_pct, 'calib': _calib(qa, y, mo),
+                  'doc': doc_pct, 'pi': float(_pi(qa, y, mo))}
+
+        num = den = 0.0
+        for k, (wt, tgt) in model.items():
+            a = actual.get(k)
+            if a is None:
+                continue
+            num += min(a / tgt, 1) * 100 * wt
+            den += wt
+        overall = (num / den) if den else None
+        if overall is not None and period == 'may' and doc_pct is not None and doc_pct < 98:
+            overall -= 5      # documentation-error detractor
+        per_qa.setdefault(qa, []).append(
+            dict(overall=overall, disp=disp_pct, calib=actual['calib'], doc=doc_pct,
+                 pi=int(actual['pi']), audits=audits))
+
+    def _avg(months, key):
+        vals = [x[key] for x in months if x[key] is not None]
+        return round(sum(vals) / len(vals), 1) if vals else None
 
     rows = []
-    for qa in sorted(qas):
-        audit = _mean(scf, 'auditTargetPct', qa, 'qaName')
-        calib = _mean(calf, 'overallScore', qa, 'reviewerName')
-        disp = _mean(scf, 'disputeAcceptPct', qa, 'qaName')
-        pi_count = int((wrf['raisedBy'].map(_canon_qa) == qa).sum()) \
-            if (wrf is not None and not wrf.empty and 'raisedBy' in wrf.columns) else 0
-        pi_pm = round(pi_count / n_months, 1)
-
-        ach = {
-            'audit':   (min(audit / 100, 1) * 100) if audit is not None else None,
-            'calib':   (min(calib / 90, 1) * 100) if calib is not None else None,
-            'dispute': (min(disp / 95, 1) * 100) if disp is not None else None,
-            'pi':      min(pi_pm / 4, 1) * 100,
-        }
-        num = den = 0.0
-        for k, a in ach.items():
-            if a is not None:
-                num += a * _SC_MODEL[k]['weight']
-                den += _SC_MODEL[k]['weight']
-        overall = round(num / den, 1) if den else None
-
+    for qa, months in per_qa.items():
+        ov = [x['overall'] for x in months if x['overall'] is not None]
         rows.append({
-            'QA': qa, 'Overall Score': overall,
-            'Audit %': audit, 'Calibration %': calib, 'Dispute Accept %': disp,
-            'Process Improv (#)': pi_count, 'PI / month': pi_pm,
+            'QA': qa,
+            'Overall Score': round(sum(ov) / len(ov), 1) if ov else None,
+            'Audit %': 100.0, 'Calibration %': _avg(months, 'calib'),
+            'Dispute Accept %': _avg(months, 'disp'), 'Doc Accuracy %': _avg(months, 'doc'),
+            'Process Improv (#)': sum(x['pi'] for x in months),
+            'Audits': sum(x['audits'] for x in months),
         })
-
     if not rows:
         st.info('No data for this view')
         return
-    tdf = (pd.DataFrame(rows)
-           .sort_values('Overall Score', ascending=False, na_position='last')
-           .reset_index(drop=True))
+    tdf = pd.DataFrame(rows).sort_values('Overall Score', ascending=False, na_position='last').reset_index(drop=True)
 
     vo = pd.to_numeric(tdf['Overall Score'], errors='coerce').dropna()
     vc = pd.to_numeric(tdf['Calibration %'], errors='coerce').dropna()
-    period_hint = (', '.join(msel) if msel else 'all months') + f' · {year}'
+    period_hint = (', '.join(msel) if msel else 'all months') + f' · {ysel}'
     kpi_row([
         dict(label='QAs Scored', value=str(len(tdf)), hint=period_hint, color='blue'),
-        dict(label='Team Avg Score', value=(f'{vo.mean():.1f}%' if len(vo) else '–'),
-             hint='Weighted model', color='green'),
+        dict(label='Team Avg Score', value=(f'{vo.mean():.1f}%' if len(vo) else '–'), hint='Weighted model', color='green'),
         dict(label='Top Performer', value=(tdf.iloc[0]['QA'] if len(vo) else '–'),
              hint=(f"{tdf.iloc[0]['Overall Score']:.1f}%" if len(vo) else ''), color='green'),
-        dict(label='Avg Calibration', value=(f'{vc.mean():.1f}%' if len(vc) else '–'),
-             hint='Live · target 90%', color='blue'),
+        dict(label='Avg Calibration', value=(f'{vc.mean():.1f}%' if len(vc) else '–'), hint='Live', color='blue'),
     ])
 
     st.markdown('**Overall QA Score**')
     bar = tdf.dropna(subset=['Overall Score'])
     if not bar.empty:
-        st.plotly_chart(hbar(list(bar['QA']), [round(v, 1) for v in bar['Overall Score']],
-                             color='#1a73e8'), width='stretch')
+        st.plotly_chart(hbar(list(bar['QA']), [round(v, 1) for v in bar['Overall Score']], color='#1a73e8'), width='stretch')
 
     st.markdown('**Scorecard Detail**')
     show_table(
         tdf,
-        pct_cols=('Audit %', 'Calibration %', 'Dispute Accept %'),
+        pct_cols=('Audit %', 'Calibration %', 'Dispute Accept %', 'Doc Accuracy %'),
         bar_cols=('Overall Score',),
-        int_cols=('Process Improv (#)',),
+        int_cols=('Process Improv (#)', 'Audits'),
     )
-    st.caption('Targets (Tenured): Audit 100% · Calibration 90% · Dispute Acceptance 95% · '
-               'Process Improvements 4/month. Each KPI achievement is capped at 100%; '
-               'Overall = weighted average of the KPIs available for the selected period '
-               '(missing KPIs are dropped and the remaining weights rescaled).')
+    st.caption('Bottom-up from live data. Audit Completion reads 100% (raw audit tabs carry no '
+               'assigned target). Dispute Acceptance = 1 − upheld ÷ audits; Doc Accuracy = 1 − '
+               'doc-errors ÷ audits. Weights are used verbatim from the sheet and normalized by the '
+               'sum applied (some official columns total 80–120%). Scored per month by tenure & '
+               'period, then averaged.')
 
 
 # ───────────────────── Agent Controllable Error Report ─────────────────────
@@ -3695,7 +3738,7 @@ def main():
     elif cur_key == "scorecard":
         render_scorecard(d_cur, get("workRequests"))
     elif cur_key == "team":
-        render_team_scorecard(get("scorecard"), get("calibration"), get("workRequests"))
+        render_team_scorecard(get("qaMetrics"), get("calibration"), get("workRequests"))
     elif cur_key == "agentErr":
         render_agent_errors(get("cara"), get("cts"), get("esc"), get("gor"))
     else:
