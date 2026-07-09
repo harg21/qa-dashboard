@@ -3062,9 +3062,11 @@ def render_scorecard(df, wr=None):
         blabel = lambda b: str(b)
         bmatch = lambda frame, b: frame[pd.to_numeric(frame["year"], errors="coerce") == b]
 
-    # keep only buckets that actually have KPI data (skip blank weeks like 17–18)
+    # keep only buckets that are a complete review period — require calibration data,
+    # so a sparse tail month (e.g. a few July audits with no calibration yet) isn't
+    # treated as the "current" period in the trend / current-vs-previous comparison
     buckets = [b for b in buckets
-               if any(_sc_avg(bmatch(d, b), SC_KPI_COL[l]) is not None for l in SC_KPI_COL)]
+               if _sc_avg(bmatch(d, b), "calibrationPct") is not None]
 
     c1, c2 = st.columns([3, 2])
     with c1:
