@@ -3006,14 +3006,19 @@ def render_scorecard(df, wr=None):
     months_present = [m for m in MONTH_ORDER if m in set(df["month"].dropna())]
     weeks_present = sorted({int(w) for w in df["week"].dropna()})
 
-    f = st.columns([1, 1.4, 2, 1.4])
+    f = st.columns([1, 1.2, 1.2, 2, 1.4])
     with f[0]:
         ysel = st.selectbox("Year", ["All"] + [str(y) for y in years], key="sc_year")
     with f[1]:
         msel = st.selectbox("Month", ["All"] + months_present, key="sc_month")
     with f[2]:
-        qsel = st.selectbox("QA", ["All"] + sorted(df["qaName"].dropna().unique()), key="sc_qa")
+        psel = st.selectbox("LOB / Process", ["All", "CS", "MO", "CO"], key="sc_lob")
+    qa_opts = sorted(df["qaName"].dropna().unique())
+    if psel != "All":
+        qa_opts = [q for q in qa_opts if _QA_PROC.get(q) == psel]
     with f[3]:
+        qsel = st.selectbox("QA", ["All"] + qa_opts, key="sc_qa")
+    with f[4]:
         tenure = st.radio("Scoring weights", list(SC_WEIGHTS.keys()), key="sc_tenure", horizontal=False)
     wsel = "All"      # bottom-up data is monthly (no week granularity)
     gran = st.radio("View by", ["Monthly", "Yearly"], horizontal=True, key="sc_gran")
@@ -3024,6 +3029,8 @@ def render_scorecard(df, wr=None):
         d = d[pd.to_numeric(d["year"], errors="coerce") == int(ysel)]
     if msel != "All":
         d = d[d["month"] == msel]
+    if psel != "All":
+        d = d[d["qaName"].map(lambda q: _QA_PROC.get(q)) == psel]
     if wsel != "All":
         d = d[d["week"] == int(wsel)]
     if qsel != "All":
@@ -3316,11 +3323,13 @@ def render_team_scorecard(qm, cal, wr):
     # ---- filters ----
     years = sorted({int(y) for y in qm['year'].dropna()})
     months_avail = [m for m in MONTH_ORDER if m in set(qm['month'].dropna())]
-    c1, c2 = st.columns([1, 3])
+    c1, c2, c3 = st.columns([1, 1, 3])
     with c1:
         yopt = ['ALL'] + [str(y) for y in years]
         ysel = st.selectbox('Year', yopt, index=(yopt.index('2026') if '2026' in yopt else 0), key='team_year')
     with c2:
+        psel = st.selectbox('LOB', ['ALL', 'CS', 'MO', 'CO'], key='team_lob')
+    with c3:
         msel = st.multiselect('Month', months_avail, key='team_month')
 
     def _keep(y, m):
@@ -3336,6 +3345,8 @@ def render_team_scorecard(qm, cal, wr):
     # the QA's total work requests over the period (not tied to audit months).
     rows = []
     for qa in sorted(qm['qa'].dropna().unique()):
+        if psel != 'ALL' and _QA_PROC.get(qa) != psel:
+            continue
         sub = qm[qm['qa'] == qa]
         sub = sub[[m and _keep(int(y), m) and int(a) > 0
                    for y, m, a in zip(sub['year'].fillna(0), sub['month'], sub['audits'])]]
