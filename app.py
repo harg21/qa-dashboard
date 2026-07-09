@@ -3290,34 +3290,56 @@ def render_team_scorecard(qm, cal, wr):
     def _keep(y, m):
         return (ysel == 'ALL' or y == int(ysel)) and (not msel or m in msel)
 
-    def _calib(qa, y, m):
-        if cal.empty or '_os' not in cal.columns:
-            return None
-        s = cal[(cal['qa'] == qa) & (cal['_y'] == y) & (cal['_m'] == m)]['_os'].dropna()
-        return round(s.mean(), 1) if len(s) else None
+    def _mask(ys, ms):
+        return [(not pd.isna(y)) and bool(m) and _keep(int(y), m) for y, m in zip(ys, ms)]
 
-    def _pi(qa, y, m):
-        if wr.empty or '_m' not in wr.columns:
-            return 0
-        return int(((wr['qa'] == qa) & (wr['_y'] == y) & (wr['_m'] == m)).sum())
-
-    # ---- per QA-month score ----
-    per_qa = {}
-    for _, r in qm.iterrows():
-        qa, yr, mo = r['qa'], r['year'], r['month']
-        if pd.isna(yr) or not mo or not _keep(int(yr), mo):
+    # ---- aggregate per QA over the selected period ----
+    # Audit-based KPIs use period totals; tenure & model period are taken from the QA's
+    # latest audit-active month (their current status). Months with zero audits are not
+    # scoreable (only disputes were filed against earlier work). Process Improvements are
+    # the QA's total work requests over the period (not tied to audit months).
+    rows = []
+    for qa in sorted(qm['qa'].dropna().unique()):
+        sub = qm[qm['qa'] == qa]
+        sub = sub[[m and _keep(int(y), m) and int(a) > 0
+                   for y, m, a in zip(sub['year'].fillna(0), sub['month'], sub['audits'])]]
+        if sub.empty:
             continue
-        y, mi = int(yr), _MI.get(mo, 0)
-        audits, upheld, docs = int(r['audits']), int(r['disputesUpheld']), int(r['docErrors'])
-        tenure = 'New' if _is_new(qa, y, mi) else 'Tenured'
-        period = _sc_period(y, mi)
+        tot_a = int(sub['audits'].sum())
+        tot_u = int(sub['disputesUpheld'].sum())
+        tot_d = int(sub['docErrors'].sum())
+        mset = sorted({(int(y), _MI.get(m, 0)) for y, m in zip(sub['year'], sub['month'])})
+        ly, lmi = mset[-1]                      # latest audit month → current tenure/period
+        tenure = 'New' if _is_new(qa, ly, lmi) else 'Tenured'
+        period = _sc_period(ly, lmi)
         model = _MODEL_APR[tenure] if period == 'apr' else _MODEL_MAY[_QA_PROC.get(qa, 'CS')][tenure]
 
-        disp_pct = round((1 - upheld / audits) * 100, 1) if audits else None
-        doc_pct = round((1 - docs / audits) * 100, 1) if audits else None
-        actual = {'audit': 100.0, 'dispute': disp_pct, 'calib': _calib(qa, y, mo),
-                  'doc': doc_pct, 'pi': float(_pi(qa, y, mo))}
+        # true active span = union of audit / calibration / work-request months (so the
+        # per-month PI rate isn't distorted by how many months a QA happened to audit in)
+        span = set(mset)
 
+        def _rows_in_period(df):
+            if df is None or df.empty or not {'qa', '_y', '_m'} <= set(df.columns):
+                return None
+            d = df[df['qa'] == qa]
+            return d[_mask(d['_y'].tolist(), d['_m'].tolist())] if len(d) else d
+
+        calib = None
+        cc = _rows_in_period(cal)
+        if cc is not None and len(cc):
+            span |= {(int(y), _MI.get(m, 0)) for y, m in zip(cc['_y'], cc['_m']) if not pd.isna(y) and m}
+            if '_os' in cc.columns and cc['_os'].notna().any():
+                calib = round(cc['_os'].dropna().mean(), 1)
+        pi_total = 0
+        ww = _rows_in_period(wr)
+        if ww is not None and len(ww):
+            span |= {(int(y), _MI.get(m, 0)) for y, m in zip(ww['_y'], ww['_m']) if not pd.isna(y) and m}
+            pi_total = int(len(ww))
+        pi_rate = pi_total / max(1, len(span))
+
+        dispute = round((1 - tot_u / tot_a) * 100, 1) if tot_a else None
+        doc = round((1 - tot_d / tot_a) * 100, 1) if tot_a else None
+        actual = {'audit': 100.0, 'dispute': dispute, 'calib': calib, 'doc': doc, 'pi': pi_rate}
         num = den = 0.0
         for k, (wt, tgt) in model.items():
             a = actual.get(k)
@@ -3326,26 +3348,13 @@ def render_team_scorecard(qm, cal, wr):
             num += min(a / tgt, 1) * 100 * wt
             den += wt
         overall = (num / den) if den else None
-        if overall is not None and period == 'may' and doc_pct is not None and doc_pct < 98:
+        if overall is not None and period == 'may' and doc is not None and doc < 98:
             overall -= 5      # documentation-error detractor
-        per_qa.setdefault(qa, []).append(
-            dict(overall=overall, disp=disp_pct, calib=actual['calib'], doc=doc_pct,
-                 pi=int(actual['pi']), audits=audits))
-
-    def _avg(months, key):
-        vals = [x[key] for x in months if x[key] is not None]
-        return round(sum(vals) / len(vals), 1) if vals else None
-
-    rows = []
-    for qa, months in per_qa.items():
-        ov = [x['overall'] for x in months if x['overall'] is not None]
         rows.append({
             'QA': qa,
-            'Overall Score': round(sum(ov) / len(ov), 1) if ov else None,
-            'Audit %': 100.0, 'Calibration %': _avg(months, 'calib'),
-            'Dispute Accept %': _avg(months, 'disp'), 'Doc Accuracy %': _avg(months, 'doc'),
-            'Process Improv (#)': sum(x['pi'] for x in months),
-            'Audits': sum(x['audits'] for x in months),
+            'Overall Score': round(overall, 1) if overall is not None else None,
+            'Audit %': 100.0, 'Calibration %': calib, 'Dispute Accept %': dispute,
+            'Doc Accuracy %': doc, 'Process Improv (#)': pi_total, 'Audits': tot_a,
         })
     if not rows:
         st.info('No data for this view')
