@@ -1322,6 +1322,37 @@ def render_calibration(df) -> None:
         int_cols=('Entries',),
     )
 
+    # ── CS New-Approach: per-criterion alignment (probe / investigate / … / red alert) ──
+    _CRIT = [('critProbe', 'Probe before solution'), ('critInvestigate', 'Investigate w/ tools'),
+             ('critAlternatives', 'Offer alternatives'), ('critFollowProcess', 'Follow process/policy'),
+             ('critRedAlert', 'Red Alert (compliance)')]
+    crit_cols = [c for c, _ in _CRIT if c in fdf.columns]
+    if crit_cols:
+        cn = fdf[fdf[crit_cols].notna().any(axis=1)]
+        if not cn.empty:
+            st.markdown('**CS criteria alignment (New Approach)**')
+            labels, align, mis, n = [], [], [], []
+            for c, lbl in _CRIT:
+                if c not in cn.columns:
+                    continue
+                dev = pd.to_numeric(cn[c], errors='coerce').dropna()
+                if not len(dev):
+                    continue
+                labels.append(lbl)
+                align.append(round((1 - dev.mean()) * 100, 1))       # 100% = every reviewer aligned
+                mis.append(round((dev > 0).mean() * 100, 1))         # % of evaluations off on this criterion
+                n.append(int(len(dev)))
+            c1, c2 = st.columns([3, 2])
+            with c1:
+                st.plotly_chart(hbar(labels, align, '#4285F4'), width='stretch')
+                st.caption('Reviewer agreement per criterion — 100% = all reviewers aligned; '
+                           'lower bars = the criteria reviewers most disagree on. CS New-Approach only.')
+            with c2:
+                ctab = pd.DataFrame({'Criterion': labels, 'Alignment %': align,
+                                     '% Misaligned': mis, 'Evals': n}).sort_values('Alignment %')
+                show_table(ctab, pct_cols=('Alignment %', '% Misaligned'), int_cols=('Evals',))
+
+
 def render_disputes(df) -> None:
     if df is None or df.empty:
         st.info('No data for this view'); return
