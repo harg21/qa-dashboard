@@ -1310,7 +1310,6 @@ def render_calibration(df) -> None:
             'Entries': cnt,
             'Avg Score': rdat['overallScore'].mean(),
             'Avg Variance': rdat['variance'].mean(),
-            'Alignment %': (rdat['variance'] == 0).mean() * 100 if cnt else 0.0,
             'Res. Exec': rdat['resExec'].mean(),
             'Bus. Logic': rdat['busLogic'].mean(),
             'Cust. Rights': rdat['custRights'].mean(),
@@ -1318,7 +1317,7 @@ def render_calibration(df) -> None:
     tdf = pd.DataFrame(rows).sort_values('Avg Score', ascending=False).reset_index(drop=True)
     show_table(
         tdf,
-        pct_cols=('Avg Variance', 'Alignment %', 'Res. Exec', 'Bus. Logic', 'Cust. Rights'),
+        pct_cols=('Avg Variance', 'Res. Exec', 'Bus. Logic', 'Cust. Rights'),
         bar_cols=('Avg Score',),
         int_cols=('Entries',),
     )
