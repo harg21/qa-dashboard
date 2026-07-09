@@ -2952,11 +2952,49 @@ def _wr_counts(wr, qa_names, months=None, year=None):
     return out
 
 
+def _bottom_up_sc_df(qm, cal, wr):
+    """Build a per-QA-per-month scorecard-shaped frame from the live bottom-up sources
+    (getQAMetrics + calibration), so the QA Scorecard reflects current data instead of
+    the collated sheet. KPI% match the Team Scorecard: audit=100, dispute=1−upheld/audits,
+    doc=1−docErrors/audits, calibration=mean alignment."""
+    if qm is None or qm.empty or 'qa' not in qm.columns:
+        return pd.DataFrame()
+    cmap = {}
+    if cal is not None and not cal.empty and 'reviewerName' in cal.columns:
+        c = cal.copy()
+        c['qa'] = c['reviewerName'].map(_canon_qa)
+        c['_y'] = c['date'].map(_sc_year)
+        c['_m'] = c['date'].map(_month_name)
+        c['_os'] = pd.to_numeric(c['overallScore'], errors='coerce')
+        c = c[c['qa'].notna() & c['_os'].notna()]
+        for k, v in c.groupby(['qa', '_y', '_m'])['_os'].mean().items():
+            cmap[k] = round(v, 1)
+    rows = []
+    for _, r in qm.iterrows():
+        qa = _canon_qa(r['qa'])
+        if not qa or pd.isna(r['year']):
+            continue
+        y, m, audits = int(r['year']), r['month'], int(r['audits'])
+        if audits <= 0 or not m:
+            continue
+        rows.append({
+            'qaName': qa, 'year': y, 'month': m, 'week': pd.NA,
+            'auditTargetPct': 100.0,
+            'calibrationPct': cmap.get((qa, y, m)),
+            'disputeAcceptPct': round((1 - int(r['disputesUpheld']) / audits) * 100, 1),
+            'docErrorPct': round((1 - int(r['docErrors']) / audits) * 100, 1),
+            'totalAssigned': audits, 'totalCompleted': audits,
+        })
+    return pd.DataFrame(rows)
+
+
 def render_scorecard(df, wr=None):
-    st.caption("Per-QA KPIs with weighted Final Points, period filters, and process-improvement counts.")
+    st.caption("Per-QA KPIs computed **bottom-up from live data** (audits, disputes, calibration, "
+               "doc errors) — current through the latest month, not the collated sheet. Weighted "
+               "Final Points use the Jan–Apr rubric (Documentation KPI); pick the tenure weighting.")
     if df is None or df.empty:
-        st.info("No scorecard data yet. Add the scorecard source to Apps Script "
-                "(getScorecardData) and deploy a New version, then ↻ Refresh.")
+        st.info("No scorecard data yet — the bottom-up metrics endpoint (getQAMetrics) returned "
+                "nothing. Confirm Code.gs is deployed, then ↻ Refresh.")
         return
     df = df.copy()
     for c in SC_NUM_COLS:
@@ -2968,18 +3006,17 @@ def render_scorecard(df, wr=None):
     months_present = [m for m in MONTH_ORDER if m in set(df["month"].dropna())]
     weeks_present = sorted({int(w) for w in df["week"].dropna()})
 
-    f = st.columns([1, 1.2, 1, 2, 1.4])
+    f = st.columns([1, 1.4, 2, 1.4])
     with f[0]:
         ysel = st.selectbox("Year", ["All"] + [str(y) for y in years], key="sc_year")
     with f[1]:
         msel = st.selectbox("Month", ["All"] + months_present, key="sc_month")
     with f[2]:
-        wsel = st.selectbox("Week", ["All"] + [str(w) for w in weeks_present], key="sc_week")
-    with f[3]:
         qsel = st.selectbox("QA", ["All"] + sorted(df["qaName"].dropna().unique()), key="sc_qa")
-    with f[4]:
+    with f[3]:
         tenure = st.radio("Scoring weights", list(SC_WEIGHTS.keys()), key="sc_tenure", horizontal=False)
-    gran = st.radio("View by", ["Weekly", "Monthly", "Yearly"], horizontal=True, key="sc_gran")
+    wsel = "All"      # bottom-up data is monthly (no week granularity)
+    gran = st.radio("View by", ["Monthly", "Yearly"], horizontal=True, key="sc_gran")
     weights = SC_WEIGHTS[tenure]
 
     d = df.copy()
@@ -3041,11 +3078,8 @@ def render_scorecard(df, wr=None):
             st.info("No data.")
     with c2:
         st.markdown("**Audit volume by QA**")
-        vol = d.groupby("qaName").agg(Assigned=("totalAssigned", "sum"),
-                                      Completed=("totalCompleted", "sum")).reset_index()
-        st.plotly_chart(stacked_bar(list(vol["qaName"]),
-                        {"Assigned": list(vol["Assigned"]), "Completed": list(vol["Completed"])},
-                        horizontal=True), width="stretch")
+        vol = d.groupby("qaName")["totalCompleted"].sum().sort_values(ascending=False)
+        st.plotly_chart(hbar(list(vol.index), [int(v) for v in vol.values], "#1a73e8"), width="stretch")
 
     # ── process improvements / work requests by QA ──
     st.markdown("### Process Improvements (work requests)")
@@ -3679,7 +3713,7 @@ def main():
     if cur_key == "moa":
         d_reg, d_deal = get("moReg"), get("moDeal")
         primary = d_reg if d_reg is not None else pd.DataFrame()
-    elif cur_key in ("team", "agentErr"):
+    elif cur_key in ("team", "agentErr", "scorecard"):
         primary = pd.DataFrame()      # aggregates several sources inside its render
     else:
         d_cur = get(cur_key)
@@ -3745,7 +3779,8 @@ def main():
     if cur_key == "moa":
         render_moa(pf(d_reg), pf(d_deal))
     elif cur_key == "scorecard":
-        render_scorecard(d_cur, get("workRequests"))
+        render_scorecard(_bottom_up_sc_df(get("qaMetrics"), get("calibration"), get("workRequests")),
+                         get("workRequests"))
     elif cur_key == "team":
         render_team_scorecard(get("qaMetrics"), get("calibration"), get("workRequests"))
     elif cur_key == "agentErr":
