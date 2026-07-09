@@ -2977,8 +2977,9 @@ def _bottom_up_sc_df(qm, cal, wr):
         y, m, audits = int(r['year']), r['month'], int(r['audits'])
         if audits <= 0 or not m:
             continue
+        wk = int(r['week']) if ('week' in qm.columns and pd.notna(r.get('week'))) else pd.NA
         rows.append({
-            'qaName': qa, 'year': y, 'month': m, 'week': pd.NA,
+            'qaName': qa, 'year': y, 'month': m, 'week': wk,
             'auditTargetPct': 100.0,
             'calibrationPct': cmap.get((qa, y, m)),
             'disputeAcceptPct': round((1 - int(r['disputesUpheld']) / audits) * 100, 1),
@@ -3006,22 +3007,23 @@ def render_scorecard(df, wr=None):
     months_present = [m for m in MONTH_ORDER if m in set(df["month"].dropna())]
     weeks_present = sorted({int(w) for w in df["week"].dropna()})
 
-    f = st.columns([1, 1.2, 1.2, 2, 1.4])
+    f = st.columns([1, 1, 1, 1.1, 1.8, 1.3])
     with f[0]:
         ysel = st.selectbox("Year", ["All"] + [str(y) for y in years], key="sc_year")
     with f[1]:
         msel = st.selectbox("Month", ["All"] + months_present, key="sc_month")
     with f[2]:
-        psel = st.selectbox("LOB / Process", ["All", "CS", "MO", "CO"], key="sc_lob")
+        wsel = st.selectbox("Week", ["All"] + [str(w) for w in weeks_present], key="sc_week")
+    with f[3]:
+        psel = st.selectbox("LOB", ["All", "CS", "MO", "CO"], key="sc_lob")
     qa_opts = sorted(df["qaName"].dropna().unique())
     if psel != "All":
         qa_opts = [q for q in qa_opts if _QA_PROC.get(q) == psel]
-    with f[3]:
-        qsel = st.selectbox("QA", ["All"] + qa_opts, key="sc_qa")
     with f[4]:
+        qsel = st.selectbox("QA", ["All"] + qa_opts, key="sc_qa")
+    with f[5]:
         tenure = st.radio("Scoring weights", list(SC_WEIGHTS.keys()), key="sc_tenure", horizontal=False)
-    wsel = "All"      # bottom-up data is monthly (no week granularity)
-    gran = st.radio("View by", ["Monthly", "Yearly"], horizontal=True, key="sc_gran")
+    gran = st.radio("View by", ["Weekly", "Monthly", "Yearly"], horizontal=True, key="sc_gran")
     weights = SC_WEIGHTS[tenure]
 
     d = df.copy()
@@ -3323,7 +3325,8 @@ def render_team_scorecard(qm, cal, wr):
     # ---- filters ----
     years = sorted({int(y) for y in qm['year'].dropna()})
     months_avail = [m for m in MONTH_ORDER if m in set(qm['month'].dropna())]
-    c1, c2, c3 = st.columns([1, 1, 3])
+    weeks_avail = sorted({int(w) for w in qm['week'].dropna()}) if 'week' in qm.columns else []
+    c1, c2, c3, c4 = st.columns([1, 1, 2, 2])
     with c1:
         yopt = ['ALL'] + [str(y) for y in years]
         ysel = st.selectbox('Year', yopt, index=(yopt.index('2026') if '2026' in yopt else 0), key='team_year')
@@ -3331,6 +3334,8 @@ def render_team_scorecard(qm, cal, wr):
         psel = st.selectbox('LOB', ['ALL', 'CS', 'MO', 'CO'], key='team_lob')
     with c3:
         msel = st.multiselect('Month', months_avail, key='team_month')
+    with c4:
+        wsel = st.multiselect('Week', weeks_avail, key='team_week')
 
     def _keep(y, m):
         return (ysel == 'ALL' or y == int(ysel)) and (not msel or m in msel)
@@ -3348,8 +3353,9 @@ def render_team_scorecard(qm, cal, wr):
         if psel != 'ALL' and _QA_PROC.get(qa) != psel:
             continue
         sub = qm[qm['qa'] == qa]
-        sub = sub[[m and _keep(int(y), m) and int(a) > 0
-                   for y, m, a in zip(sub['year'].fillna(0), sub['month'], sub['audits'])]]
+        wk_col = sub['week'].fillna(0) if 'week' in sub.columns else [0] * len(sub)
+        sub = sub[[m and _keep(int(y), m) and int(a) > 0 and (not wsel or int(w) in wsel)
+                   for y, m, a, w in zip(sub['year'].fillna(0), sub['month'], sub['audits'], wk_col)]]
         if sub.empty:
             continue
         tot_a = int(sub['audits'].sum())
